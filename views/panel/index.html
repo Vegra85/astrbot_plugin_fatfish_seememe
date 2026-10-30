@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>看图看懂梗</title>
+<style>
+  :root { --bg:#ffffff; --fg:#1f2328; --muted:#656d76; --line:#e5e7eb; --card:#f6f8fa; --accent:#2563eb; --bad:#c2410c; --ok:#15803d; --warnbg:#fff7ed; }
+  html[data-theme="dark"] { --bg:#16181d; --fg:#e6e6e6; --muted:#9aa4b2; --line:#2c313a; --card:#1e2128; --accent:#60a5fa; --bad:#fb923c; --ok:#4ade80; --warnbg:#2a1f16; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:16px; background:var(--bg); color:var(--fg); font:14px/1.6 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; }
+  h1 { font-size:18px; margin:0 0 4px; }
+  h2 { font-size:15px; margin:22px 0 8px; }
+  .sub { color:var(--muted); margin:0 0 14px; }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:10px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:10px 12px; }
+  .card b { display:block; font-size:22px; }
+  .card span { color:var(--muted); font-size:12px; }
+  .info { margin:10px 0 0; color:var(--muted); font-size:13px; }
+  .info b { color:var(--fg); font-weight:500; }
+  .warn { display:none; background:var(--warnbg); border:1px solid var(--bad); color:var(--bad); border-radius:10px; padding:8px 12px; margin:0 0 12px; }
+  .list { display:flex; flex-direction:column; gap:8px; }
+  .item { border:1px solid var(--line); border-radius:10px; padding:8px 12px; }
+  .item .meta { color:var(--muted); font-size:12px; display:flex; flex-wrap:wrap; gap:2px 12px; }
+  .item .meta .who { color:var(--fg); }
+  .item .meta .model { margin-left:auto; }
+  .item .text { margin-top:2px; word-break:break-word; }
+  .empty { color:var(--muted); border:1px solid var(--line); border-radius:10px; padding:10px 12px; }
+  .card i { font-style:normal; }
+  .tag { display:inline-block; padding:0 6px; border-radius:6px; font-size:12px; border:1px solid var(--line); white-space:nowrap; color:var(--muted); }
+  .muted { color:var(--muted); }
+  .log { padding-left:18px; margin:0; }
+  .log li { margin:2px 0; }
+  #err { color:var(--bad); }
+  .try { border:1px dashed var(--line); border-radius:10px; padding:12px; }
+  .try.drag { border-color:var(--accent); }
+  .row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+  .row input[type=text] { flex:1 1 220px; min-width:0; font:inherit; padding:5px 8px; border-radius:6px; border:1px solid var(--line); background:var(--bg); color:var(--fg); }
+  button, .pick { font:inherit; font-size:13px; padding:5px 12px; border-radius:6px; border:1px solid var(--line); background:var(--bg); color:var(--fg); cursor:pointer; }
+  button:hover, .pick:hover { border-color:var(--accent); color:var(--accent); }
+  button.main { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button.main:hover { color:#fff; opacity:.9; }
+  button:disabled { opacity:.5; cursor:default; }
+  .pick input { display:none; }
+  .preview { display:none; margin-top:10px; max-width:100%; max-height:220px; border-radius:8px; border:1px solid var(--line); }
+  .result { display:none; margin-top:12px; }
+  .result h3 { font-size:13px; margin:12px 0 4px; color:var(--muted); font-weight:500; }
+  .result .cap { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:8px 10px; }
+  pre { white-space:pre-wrap; word-break:break-word; background:var(--card); border:1px solid var(--line); border-radius:8px; padding:8px 10px; margin:0; font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+  details summary { cursor:pointer; color:var(--muted); font-size:13px; margin-top:10px; }
+  #try-status { color:var(--muted); font-size:13px; }
+</style>
+</head>
+<body>
+<h1>看图看懂梗</h1>
+<p class="sub">机器人回话前，先把图看懂：图里的字、画面、在玩什么梗、是不是在拿它开涮、有没有坑。再提醒它别复述画面、直接接梗。</p>
+<div class="warn" id="warn">现在没有能看图的模型：插件配置里选「看图用哪个模型」，或者在 AstrBot 的模型设置里给对话模型的「模型能力」勾上「图像」。</div>
+<div id="err"></div>
+<div class="cards">
+  <div class="card"><b id="n-look">-</b><span>今天看了几张（上限 <i id="n-daily">-</i>）</span></div>
+  <div class="card"><b id="n-turns">-</b><span>今天带进回话的轮数</span></div>
+  <div class="card"><b id="n-cached">-</b><span>今天直接用了记住的</span></div>
+  <div class="card"><b id="n-tokens">-</b><span>今天看图用掉的 token</span></div>
+  <div class="card"><b id="n-cache">-</b><span>记住的图</span></div>
+  <div class="card"><b id="n-errors">-</b><span>今天出错</span></div>
+</div>
+<p class="info">看图模型：<b id="i-vision">-</b> · 对话模型自己能看图：<b id="i-main">-</b> · 认自己用的名字：<b id="i-names">-</b></p>
+
+<h2>试一张图</h2>
+<div class="try" id="try">
+  <div class="row">
+    <label class="pick">选一张图<input type="file" id="file" accept="image/*"></label>
+    <input type="text" id="said" placeholder="发图时说的话（可以不填，比如「这不就是你吗」）" maxlength="120">
+    <button class="main" id="go" disabled>看一下</button>
+  </div>
+  <div class="muted" style="font-size:12px;margin-top:6px">也可以把图拖进来，或者直接粘贴。会真的调用看图模型（算今天的次数），结果不进缓存。</div>
+  <img class="preview" id="preview" alt="">
+  <div id="try-status"></div>
+  <div class="result" id="result">
+    <h3>看到的</h3>
+    <div class="cap" id="r-cap"></div>
+    <h3>机器人这一轮会看到的</h3>
+    <pre id="r-block"></pre>
+    <details><summary>发给看图模型的话</summary><pre id="r-prompt"></pre></details>
+    <div class="muted" style="font-size:12px;margin-top:8px" id="r-meta"></div>
+  </div>
+</div>
+
+<h2>最近看懂的图</h2>
+<div class="list" id="recent"></div>
+
+<h2>出错记录</h2>
+<ul class="log" id="log"></ul>
+
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+  const ago = (t) => {
+    if (!t) return "";
+    const s = Math.max(0, Math.floor(Date.now() / 1000 - t));
+    if (s < 60) return s + " 秒前";
+    if (s < 3600) return Math.floor(s / 60) + " 分钟前";
+    if (s < 86400) return Math.floor(s / 3600) + " 小时前";
+    return Math.floor(s / 86400) + " 天前";
+  };
+  let api = null, picked = null;
+
+  function render(d) {
+    const t = d.today || {}, lim = d.limits || {};
+    $("n-look").textContent = t.n || 0;
+    $("n-daily").textContent = lim.daily == null ? "-" : lim.daily;
+    $("n-turns").textContent = t.turns || 0;
+    $("n-cached").textContent = t.cached || 0;
+    $("n-tokens").textContent = t.tokens || 0;
+    $("n-cache").textContent = d.cache || 0;
+    $("n-errors").textContent = t.errors || 0;
+    $("i-vision").textContent = d.vision || "没有";
+    $("i-main").textContent = d.main_sees ? "能" : "不能";
+    $("i-names").textContent = (d.names || []).join("、") || "还不知道（有人说话以后会自己拿 QQ 昵称）";
+    $("warn").style.display = d.vision ? "none" : "block";
+    const rows = (d.recent || []).map((r) => '<div class="item"><div class="meta"><span>' + ago(r.t) + "</span><span>" +
+      esc(r.where || "") + '</span><span class="who">' + esc(r.who || "") + "</span>" +
+      (r.bg ? '<span class="tag">先看好的</span>' : "") + '<span class="model">' + esc(r.model || "") +
+      (r.tokens ? " · " + esc(r.tokens) + " token" : "") + '</span></div><div class="text">' + esc(r.cap) + "</div></div>");
+    $("recent").innerHTML = rows.join("") ||
+      '<div class="empty">还没看过图。群里有人 @ 机器人、带着图（或者先发图再 @）就会看。</div>';
+    $("log").innerHTML = (d.errors || []).map((e) => '<li><span class="muted">' + ago(e.t) + "</span> " + esc(e.text) + "</li>").join("") ||
+      '<li class="muted">没有。</li>';
+  }
+
+  async function load() {
+    try { render(await api.apiGet("state")); $("err").textContent = ""; }
+    catch (e) { $("err").textContent = "读不到插件状态：" + (e && e.message ? e.message : e); }
+  }
+
+  function pick(f) {
+    if (!f || !/^image\//.test(f.type || "")) { $("try-status").textContent = "这不是图片。"; return; }
+    if (f.size > 10 * 1024 * 1024) { $("try-status").textContent = "图太大了（10MB 以内）。"; return; }
+    picked = f;
+    const img = $("preview");
+    if (img.dataset.url) URL.revokeObjectURL(img.dataset.url);
+    img.dataset.url = URL.createObjectURL(f);
+    img.src = img.dataset.url;
+    img.style.display = "block";
+    $("go").disabled = !api;
+    $("try-status").textContent = "";
+    $("result").style.display = "none";
+  }
+
+  $("file").addEventListener("change", (ev) => pick(ev.target.files && ev.target.files[0]));
+  const box = $("try");
+  box.addEventListener("dragover", (ev) => { ev.preventDefault(); box.classList.add("drag"); });
+  box.addEventListener("dragleave", () => box.classList.remove("drag"));
+  box.addEventListener("drop", (ev) => { ev.preventDefault(); box.classList.remove("drag"); pick(ev.dataTransfer.files && ev.dataTransfer.files[0]); });
+  document.addEventListener("paste", (ev) => {
+    const it = [...((ev.clipboardData && ev.clipboardData.items) || [])].find((x) => x.type && x.type.startsWith("image/"));
+    if (it) pick(it.getAsFile());
+  });
+
+  $("go").addEventListener("click", async () => {
+    if (!picked || !api) return;
+    const go = $("go");
+    go.disabled = true;
+    $("result").style.display = "none";
+    $("try-status").textContent = "正在看……（几秒到几十秒）";
+    try {
+      await api.apiPost("prep", { said: $("said").value || "" });
+      const r = await api.upload("test", picked);
+      $("r-cap").textContent = r.caption || "";
+      $("r-block").textContent = r.block || "";
+      $("r-prompt").textContent = r.prompt || "";
+      $("r-meta").textContent = "模型：" + (r.model || "-") + " · " + (r.tokens || 0) + " token · " +
+        (r.avatar ? "带了机器人的头像对照" : "没带头像对照");
+      $("result").style.display = "block";
+      $("try-status").textContent = "";
+      if (r.state) render(r.state);
+    } catch (e) {
+      $("try-status").textContent = (e && e.message ? e.message : String(e));
+    } finally {
+      go.disabled = false;
+    }
+  });
+
+  async function start() {
+    for (let i = 0; i < 50 && !window.AstrBotPluginView; i++) await new Promise((r) => setTimeout(r, 100));
+    api = window.AstrBotPluginView;
+    if (!api) { $("err").textContent = "这个页面要在 AstrBot 的插件页面里打开。"; return; }
+    await api.ready();
+    $("go").disabled = !picked;
+    await load();
+    setInterval(load, 15000);
+  }
+  window.addEventListener("load", start);
+})();
+</script>
+</body>
+</html>

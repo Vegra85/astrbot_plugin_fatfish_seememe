@@ -1,0 +1,115 @@
+{
+  "enable": {
+    "description": "开启看图看懂梗",
+    "type": "bool",
+    "default": true
+  },
+  "vision_provider_id": {
+    "description": "看图用哪个模型",
+    "type": "string",
+    "default": "",
+    "_special": "select_provider",
+    "hint": "留空 = 对话模型能看图就用它；不能就用 AstrBot 的「图片转述模型」（配置 → AI → 模型）；都没有就看不了图。选一个能看图的模型（模型设置里「模型能力」勾了「图像」的）。一张图大约几百到一千多 token。"
+  },
+  "also_when_main_sees": {
+    "description": "对话模型自己能看图时 也另外看一遍",
+    "type": "bool",
+    "default": true,
+    "hint": "对话模型能看图时，AstrBot 会直接把这条消息的图给它看。开着：插件再专门看一遍梗、跟机器人有没有关系、有没有坑（更懂梗，多花一次）。关掉：只附上「这一轮怎么接」。"
+  },
+  "remember": {
+    "description": "看到了什么记进聊天记录",
+    "type": "bool",
+    "default": true,
+    "hint": "开着：以后聊起这张图机器人还记得。「这一轮怎么接」那段不会记进去。"
+  },
+  "hints": {
+    "description": "附上「这一轮怎么接」",
+    "type": "bool",
+    "default": true,
+    "hint": "提醒机器人：别复述画面、直接接梗点；图在说它就接住；图里有坑别上当。"
+  },
+  "bot_names": {
+    "description": "机器人的名字和外号",
+    "type": "list",
+    "default": [],
+    "hint": "看图的模型靠这个认「图里写的是不是它」。留空 = 用它的 QQ 昵称和群名片。"
+  },
+  "bot_look": {
+    "description": "机器人长什么样",
+    "type": "text",
+    "default": "",
+    "hint": "一两句话，比如「蓝头发、戴鱼形发卡的女孩」。群友拿长得像它的图逗它时，看图的模型能认出来。"
+  },
+  "avatar_mode": {
+    "description": "拿什么头像给看图的模型对照",
+    "type": "string",
+    "default": "QQ 头像",
+    "options": [
+      "QQ 头像",
+      "自定义图片",
+      "不用"
+    ],
+    "hint": "看图时多带一张机器人的头像，让模型对照「图里是不是它」。QQ 头像 = 从 qlogo.cn 拿机器人账号的头像（一天拿一次）。"
+  },
+  "avatar_url": {
+    "description": "自定义头像的图片地址",
+    "type": "string",
+    "default": "",
+    "hint": "上一项选「自定义图片」时用：网址或者本机文件路径。"
+  },
+  "max_images": {
+    "description": "一轮最多看几张图",
+    "type": "int",
+    "default": 3
+  },
+  "recent_sec": {
+    "description": "图和 @ 分开发：他多少秒内发的图算数",
+    "type": "int",
+    "default": 120,
+    "hint": "群友常常先发图、再 @ 机器人说话。这条消息没带图时，看他这么多秒内发的图。"
+  },
+  "refer_sec": {
+    "description": "说「上面那张图」时往回找多少秒",
+    "type": "int",
+    "default": 600
+  },
+  "prefetch": {
+    "description": "群里的图都先看好",
+    "type": "bool",
+    "default": false,
+    "hint": "开了以后，没人找机器人的图也会先看（以后有人提起就不用等），花费会多很多。"
+  },
+  "max_chars": {
+    "description": "看图结果最多多少字",
+    "type": "int",
+    "default": 180
+  },
+  "wait_sec": {
+    "description": "回话前最多等看图多少秒",
+    "type": "int",
+    "default": 30,
+    "hint": "超过这个时间这一轮先不带，看完会存着，下次直接用。"
+  },
+  "timeout_sec": {
+    "description": "看一张图最多多少秒",
+    "type": "int",
+    "default": 40
+  },
+  "hourly_max": {
+    "description": "每小时最多看几张",
+    "type": "int",
+    "default": 60,
+    "hint": "同一张图看过一次就记住了，不算次数。"
+  },
+  "daily_max": {
+    "description": "每天最多看几张",
+    "type": "int",
+    "default": 300
+  },
+  "cache_keep": {
+    "description": "记住多少张看过的图",
+    "type": "int",
+    "default": 600
+  }
+}

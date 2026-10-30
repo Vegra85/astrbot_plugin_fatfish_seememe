@@ -1,0 +1,16 @@
+name: astrbot_plugin_fatfish_seememe
+display_name: 大肥鱼 · 看图看懂梗
+desc: 机器人回话前先把图看懂：图里的字、画面、在玩什么梗、是不是在拿机器人开涮（拿它的头像对照）、有没有擦边挖坑；再提醒它别复述画面、直接接梗。图和 @ 分开发、引用别人的图、说「上面那张图」都对得上。对话模型看不了图时，用你选的看图模型。
+short_desc: 让机器人看懂群里的梗图：认出图在说它、看穿挖坑，回话不再像客服复述画面
+version: v0.1.0
+author: Vegra85
+repo: https://github.com/Vegra85/astrbot_plugin_fatfish_seememe
+astrbot_version: ">=4.29,<5"
+support_platforms:
+  - aiocqhttp
+social_link: https://github.com/Vegra85
+tags:
+  - 图片理解
+  - 梗图
+  - 表情包
+  - 群聊
