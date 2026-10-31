@@ -6,6 +6,7 @@
 交给能看图的模型，用「字 / 画面 / 梗 / 跟你 / 坑」五样写清楚：图里有没有机器人自己、在玩什么梗、有没有坑；
 再附上「这一轮怎么接」：别复述画面、对梗点做反应、认出图在说自己、看穿坑反挖回去。
 看到了什么会记进聊天记录（以后聊起这张图还记得）；「这一轮怎么接」只给这一轮看。
+v0.2.0：转发的聊天记录里的图也看（以前只写「[图片]」）；表情包词典（同一张反复出现 / 直接拿表情包找机器人 → 认真认一次记下来，以后直接用）。
 """
 
 import asyncio
@@ -27,12 +28,19 @@ import astrbot.api.message_components as Comp
 from .seer import (
     TEXT_REFERS,
     Cache,
+    StickerDict,
     block,
     build_prompt,
     caption_block,
+    deep_caption,
+    forward_lines,
+    forward_nodes,
     hints_block,
     key_ok,
+    parse_deep,
+    parse_forward,
     refused,
+    row_text,
     trim,
 )
 
@@ -102,6 +110,16 @@ class FatfishSeeMeme(Star):
         self.stats = st.get("stats") or {}
         self.recent_caps = deque(st.get("recent") or [], maxlen=60)
         self.errors = deque(st.get("errors") or [], maxlen=20)
+        # 表情包词典：单独一个文件（跨群共用、重启不丢；想清空就删掉这个文件）
+        self.sticker_file = self.data_dir / "stickers.json"
+        self.stickers = StickerDict(
+            self._c("sticker_after", 3),
+            self._c("sticker_daily", 30),
+            self._c("sticker_keep", 2000),
+        )
+        self.stickers.load(self._load(self.sticker_file))
+        self.stickers.dirty = False
+        self._sd_saved = time.time()
         self.chat = defaultdict(
             lambda: deque(maxlen=16)
         )  # 会话 -> [(时间, 名字, 文字)]
@@ -109,6 +127,10 @@ class FatfishSeeMeme(Star):
             lambda: deque(maxlen=30)
         )  # 会话 -> [(时间, QQ, 名字, 图)]
         self.given = defaultdict(dict)  # 会话 -> {图: 记进聊天记录的时间}
+        self.fwds = defaultdict(
+            lambda: deque(maxlen=10)
+        )  # 会话 -> [(时间, QQ, 名字, 转发)]：先发转发、再 @ 机器人
+        self.fwd_cache = {}  # 转发的 id -> (时间, 拆好的)：同一段别反复去拿
         self.hour = deque(maxlen=1000)
         self.inflight = {}
         self.bot_names = {}  # self_id -> 昵称（没在配置里填名字时用）
@@ -127,15 +149,16 @@ class FatfishSeeMeme(Star):
     def _c(self, key, default):
         return _num(self.config.get(key, default), default)
 
-    def _load(self):
+    def _load(self, path=None):
         try:
-            d = json.loads(self.state_file.read_text(encoding="utf-8"))
+            d = json.loads((path or self.state_file).read_text(encoding="utf-8"))
             return d if isinstance(d, dict) else {}
         except Exception:
             return {}
 
-    def _save(self, force=False):
-        """AstrBot 被直接关掉（关窗口、结束进程）时不会调 terminate()，所以有变化就尽快存：最多 3 秒存一次"""
+    def _save(self, force=False, sd=False):
+        """AstrBot 被直接关掉（关窗口、结束进程）时不会调 terminate()，所以有变化就尽快存：最多 3 秒存一次
+        表情包词典（每条带图的消息都要记一笔，文件也大一些）：最多 30 秒存一次；刚认好一张（sd=True）马上存"""
         self._dirty = True
         if not force and time.time() - self._saved_at < 3:
             return
@@ -147,18 +170,35 @@ class FatfishSeeMeme(Star):
                 "recent": list(self.recent_caps),
                 "errors": list(self.errors),
             }
-            tmp = self.state_file.with_suffix(".tmp")
-            tmp.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
-            tmp.replace(self.state_file)
+            self._write(self.state_file, d)
             self._dirty = False
+            if self.stickers.dirty and (sd or time.time() - self._sd_saved >= 30):
+                self._save_stickers()
         except Exception as e:
             logger.warning(f"{TAG} 存档失败：{e!r}")
+
+    def _save_stickers(self):
+        self.stickers.dirty = False
+        self._sd_saved = time.time()
+        try:
+            self._write(self.sticker_file, self.stickers.dump())
+        except OSError as e:
+            self.stickers.dirty = True
+            logger.warning(f"{TAG} 表情包词典存档失败：{e!r}")
+
+    @staticmethod
+    def _write(path, d):
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(path)
 
     async def _save_loop(self):
         while True:
             await asyncio.sleep(5)
             if self._dirty:
                 self._save(force=True)
+            elif self.stickers.dirty and time.time() - self._sd_saved >= 30:
+                self._save_stickers()
 
     def _ensure_saver(self):
         if self._saver is None or self._saver.done():
@@ -176,7 +216,7 @@ class FatfishSeeMeme(Star):
             t.cancel()
         if self._saver:
             self._saver.cancel()
-        self._save(force=True)
+        self._save(force=True, sd=True)
 
     def _today(self):
         day = time.strftime("%Y-%m-%d")
@@ -189,7 +229,8 @@ class FatfishSeeMeme(Star):
                 "cached": 0,
                 "turns": 0,
             }
-        self.stats.setdefault("turns", 0)
+        for k in ("turns", "dict", "deep", "fwd"):  # 老存档里没有的
+            self.stats.setdefault(k, 0)
         return self.stats
 
     def _err(self, text):
@@ -379,6 +420,8 @@ class FatfishSeeMeme(Star):
                 out.append(c.text)
             elif isinstance(c, Comp.Image):
                 out.append("[图片]")
+            elif isinstance(c, Comp.Forward):
+                out.append("[聊天记录]")
         return "".join(out).strip() or (event.message_str or "").strip()
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=sys.maxsize - 10)
@@ -395,31 +438,72 @@ class FatfishSeeMeme(Star):
         except Exception:
             pass
         name = event.get_sender_name() or str(event.get_sender_id())
+        uid = str(event.get_sender_id())
         imgs = self._images(event, now)
+        before = [x for _t, _n, x in list(self.chat[umo])[-2:]]
         self.chat[umo].append(
             (now, name, (self._plain(event) or ("[表情]" if imgs else ""))[:80])
         )
         for im in imgs:
-            self.imgs[umo].append((now, str(event.get_sender_id()), name, im))
+            self.imgs[umo].append((now, uid, name, im))
+        if self._c("forward_images", True):
+            for ref in self._fwd_refs(event):
+                self.fwds[umo].append((now, uid, name, ref))
+        due = self._sticker_seen(event, umo, uid, imgs, before, now)
         self._ensure_saver()
         if not self.config.get("bot_names"):
             gid = str(event.get_group_id() or "")
             if sid not in self.bot_names or (gid and (sid, gid) not in self.cards):
                 self._spawn(self._learn_name(event, sid, gid))
-        if imgs and self._c("prefetch", False):
-            for im in (
-                imgs
-            ):  # 「群里的图都先看」：没人找机器人的图也先看好（以后有人提起就不用等）
+        # 「群里的图都先看好」：没人找机器人的图也先看好（以后有人提起就不用等）；
+        # 表情包词典该认的那张（第 3 次出现 / 直接拿表情包找机器人）也在这里开始认 —— 机器人要回话的那一轮会等它
+        prefetch = self._c("prefetch", False)
+        for im in imgs:
+            if prefetch or im["key"] in due:
                 self._spawn(
                     self._caption(
                         im,
-                        self._ctx(umo, im, False, place=self._place(event)),
+                        self._ctx(
+                            umo, im, self._to_bot(event), place=self._place(event)
+                        ),
                         umo,
                         sid,
                         background=True,
                         where=self._where(event),
                     )
                 )
+
+    @staticmethod
+    def _to_bot(event):
+        return bool(
+            event.is_private_chat() or getattr(event, "is_at_or_wake_command", False)
+        )
+
+    def _sd_on(self):
+        return bool(self._c("sticker_dict", True))
+
+    def _sticker_seen(self, event, umo, uid, imgs, before, now):
+        """表情包词典：这条消息里的图各记一次（只认 QQ 给的文件名 / 表情 id —— 网址每次发都不一样，数不了）；
+        没带图的话，看看是不是有人刚发完表情包、这句是接它的。→ 现在该深度认的那几张的凭据"""
+        if not self._sd_on():
+            return set()
+        if not imgs:
+            self.stickers.after_msg(umo, uid, self._text(event), now)
+            return set()
+        to_bot, said, due = self._to_bot(event), self._text(event), set()
+        for im in imgs[:3]:
+            if im["key"].startswith("f:") and self.stickers.seen(
+                im["key"],
+                umo,
+                uid,
+                before=before,
+                said=said,
+                to_bot=to_bot,
+                sticker=bool(im.get("kind")),
+                now=now,
+            ):
+                due.add(im["key"])
+        return due
 
     async def _learn_name(self, event, sid, gid):
         bot = getattr(event, "bot", None)
@@ -468,13 +552,109 @@ class FatfishSeeMeme(Star):
             gid = ""
         return f"群 {gid}" if gid else "私聊"
 
+    # ───────── 转发的聊天记录（v0.2.0）─────────
+    def _fwd_refs(self, event):
+        """这条消息自己带的转发 → [{"id", "content"}]（NapCat 有时直接把内容带在消息段里，就不用再去拿了）"""
+        out = []
+        for s in self._raw_segs(event):
+            if s.get("type") != "forward":
+                continue
+            d = s.get("data") or {}
+            content = d.get("content") if isinstance(d.get("content"), list) else None
+            fid = str(d.get("id") or d.get("res_id") or "")
+            if not fid and content:
+                fid = (
+                    "h"
+                    + hashlib.sha1(
+                        json.dumps(content, ensure_ascii=False, sort_keys=True).encode()
+                    ).hexdigest()[:16]
+                )
+            if fid:
+                out.append({"id": fid, "content": content})
+        if not out:  # 别的平台 / 没有原始消息段：AstrBot 的 Forward 组件只留了 id
+            for c in event.get_messages() or []:
+                if isinstance(c, Comp.Forward) and getattr(c, "id", None):
+                    out.append({"id": str(c.id), "content": None})
+        return out
+
+    def _forwards(self, event, items):
+        """这一轮要看的转发 → [(转发, 哪来的, 谁转发的)]：这条消息的 / 引用的那条 →
+        都没有（这条也没带图、没引用图）就看他刚才发的（转发的聊天记录里没法 @ 人，群友都是先转发、再 @ 机器人）"""
+        umo, now, uid = (
+            event.unified_msg_origin,
+            time.time(),
+            str(event.get_sender_id()),
+        )
+        me = event.get_sender_name() or uid
+        out = [(ref, "here", me) for ref in self._fwd_refs(event)]
+        for c in event.get_messages() or []:
+            if isinstance(c, Comp.Reply) and c.chain:
+                for x in c.chain:
+                    if isinstance(x, Comp.Forward) and getattr(x, "id", None):
+                        who = c.sender_nickname or str(c.sender_id or "")
+                        out.append(({"id": str(x.id), "content": None}, "quoted", who))
+        if not out and not any(src in ("here", "quoted") for _im, src in items):
+            for t, u, n, ref in reversed(self.fwds.get(umo) or []):
+                if now - t <= self._c("recent_sec", 120) and u == uid:
+                    out.append((ref, "recent", n))
+                    break
+        seen, uniq = set(), []
+        for ref, src, who in out:
+            if ref["id"] not in seen:
+                seen.add(ref["id"])
+                uniq.append((ref, src, who))
+        return uniq[:2]
+
+    async def _forward_rows(self, event, ref):
+        """→ (rows, imgs, 一共几条)；拿不到 → ([], [], 0)"""
+        fid, now = ref["id"], time.time()
+        hit = self.fwd_cache.get(fid)
+        if hit and now - hit[0] < 600:
+            return hit[1]
+        payload = ref.get("content")
+        bot = getattr(event, "bot", None)
+        if not forward_nodes(payload) and bot is not None:
+            sid = str(event.get_self_id() or "")
+            route = {"self_id": int(sid)} if sid.isdigit() else {}
+            tries = [{"message_id": fid}, {"id": fid}]
+            if fid.isdigit():
+                tries.append({"message_id": int(fid)})
+            for params in tries:
+                got = await asyncio.gather(
+                    asyncio.wait_for(
+                        bot.call_action("get_forward_msg", **params, **route), 10
+                    ),
+                    return_exceptions=True,
+                )
+                payload = got[0]  # 调不通（ActionFailed / 超时…）是个异常 → 当成没拿到
+                if forward_nodes(payload):
+                    break
+        nodes = forward_nodes(payload)
+        rows, imgs = parse_forward(payload, max_rows=30)
+        if not rows:
+            self._warn_once(
+                "fwd",
+                "读不出转发的聊天记录（QQ 端的 get_forward_msg 没给内容）这一轮里面的图先不看",
+                600,
+            )
+        got = (rows, imgs, len(nodes))
+        for k in [k for k, v in self.fwd_cache.items() if now - v[0] > 600]:
+            self.fwd_cache.pop(k, None)
+        if rows:
+            self.fwd_cache[fid] = (now, got)
+        return got
+
     # ───────── 要回话了：把看懂的图塞进这一轮 ─────────
     @filter.on_llm_request(priority=50)
     async def on_llm_req(self, event: AstrMessageEvent, req: ProviderRequest):
         if not self._c("enable", True):
             return
         items = self._relevant(event)
-        if not items:
+        fwds = self._forwards(event, items) if self._c("forward_images", True) else []
+        if any(src in ("here", "quoted") for _r, src, _w in fwds):
+            # 他引用的是一段转发：「这图啥意思」说的就是转发里的图，别再去拿群里最近那张
+            items = [(im, src) for im, src in items if src != "refer"]
+        if not items and not fwds:
             return
         umo, sid, now = (
             event.unified_msg_origin,
@@ -491,7 +671,12 @@ class FatfishSeeMeme(Star):
             for im, src in items
             if not (remember and im["key"] in given and src in ("recent", "refer"))
         ]
-        if not items:
+        fwds = [
+            (ref, src, who)
+            for ref, src, who in fwds
+            if not (remember and "fw:" + ref["id"] in given and src == "recent")
+        ]
+        if not items and not fwds:
             return
         for p in req.extra_user_content_parts or []:
             t = getattr(p, "text", None) if not isinstance(p, dict) else p.get("text")
@@ -503,19 +688,18 @@ class FatfishSeeMeme(Star):
                     6 * 3600,
                 )
                 break
-        # 主模型自己能看图：这条消息的图 / 引用的图 AstrBot 会直接给它看；要不要另外再看一遍（默认看：认梗、认自己、看坑更准）
+        # 主模型自己能看图：这条消息的图 / 引用的图（含引用的转发里的图）AstrBot 会直接给它看；
+        # 要不要另外再看一遍（默认看：认梗、认自己、看坑更准）
         main_sees = await self._main_sees(umo)
+        skip_seen = main_sees and not self._c("also_when_main_sees", True)
         look = [
             (im, src)
             for im, src in items
-            if not (
-                main_sees
-                and not self._c("also_when_main_sees", True)
-                and src in ("here", "quoted")
-            )
+            if not (skip_seen and src in ("here", "quoted"))
         ]
         ask = self._text(event)
         place = self._place(event)
+        where = self._where(event)
         tasks = {
             im["key"]: self._spawn(
                 self._caption(
@@ -523,31 +707,69 @@ class FatfishSeeMeme(Star):
                     self._ctx(umo, im, True, ask=ask, place=place),
                     umo,
                     sid,
-                    where=self._where(event),
+                    where=where,
                 )
             )
             for im, _src in look
         }
-        caps = {}
-        if tasks:
-            done, pending = await asyncio.wait(
-                list(tasks.values()), timeout=self._c("wait_sec", 30)
+        # 转发的聊天记录：拿到里面的消息 → 最多看 forward_max 张、一起看（和上面的图同时看）
+        loaded = []
+        if fwds:
+            got = await asyncio.gather(
+                *[self._forward_rows(event, ref) for ref, _s, _w in fwds],
+                return_exceptions=True,
             )
-            if pending:  # 没看完的接着看（看完存着 下次直接用）
-                self._warn_once(
-                    "timeout",
-                    f"看图超过 {self._c('wait_sec', 30)} 秒 这一轮先不带没看完的",
-                    60,
+            for (ref, src, who), g in zip(fwds, got):
+                if not isinstance(g, Exception) and g[1]:
+                    loaded.append((ref, src, who, *g))
+        fwd_tasks, budget = {}, max(0, self._c("forward_max", 6))
+        for ref, src, who, rows, imgs, _total in loaded:
+            if skip_seen and src == "quoted":
+                continue
+            for fi in imgs:
+                if budget <= 0:
+                    break
+                if not fi["ref"]:
+                    continue
+                fi["key"] = self._key(fi["ref"], fi.get("file"))
+                if fi["key"] in tasks or fi["key"] in fwd_tasks:
+                    continue
+                budget -= 1
+                r = rows[fi["row"]]
+                im = {
+                    "ref": fi["ref"],
+                    "alt": "",
+                    "key": fi["key"],
+                    "sender": r["who"],
+                    "uid": "",
+                    "t": now,
+                    "quoted": False,
+                    "kind": fi.get("kind") or "",
+                    "said": "".join(
+                        p for p in r["parts"] if isinstance(p, str)
+                    ).strip(),  # 那条消息里的字（不带「[图片]」）
+                }
+                ctx = {
+                    "sender": r["who"],
+                    "to_bot": True,
+                    "chat": [
+                        f"{x['who']}: {row_text(x, imgs)}"
+                        for x in rows[max(0, fi["row"] - 4) : fi["row"]]
+                    ],
+                    "said": im["said"],
+                    "ask": ask,
+                    "place": place,
+                    "via": "转发的聊天记录",
+                }
+                fwd_tasks[fi["key"]] = self._spawn(
+                    self._caption(im, ctx, umo, sid, where=where)
                 )
-            for k, t in tasks.items():
-                if (
-                    t in done
-                    and not t.cancelled()
-                    and t.exception() is None
-                    and t.result()
-                ):
-                    caps[k] = t.result()
-        keep_items, temp_items = [], []
+        caps, fcaps = await asyncio.gather(
+            self._collect(tasks, self._c("wait_sec", 30)),
+            self._collect(fwd_tasks, self._c("forward_wait_sec", 25), "转发里的图"),
+        )
+        fcaps = {**caps, **fcaps}
+        keep_items, temp_items, keep_fw, temp_fw, fw_caps = [], [], [], [], []
         for im, src in items:
             cap = caps.get(im["key"])
             if not cap:
@@ -558,19 +780,42 @@ class FatfishSeeMeme(Star):
                 given[im["key"]] = now
             else:
                 temp_items.append(row)
+        for ref, src, who, rows, imgs, total in loaded:
+            got = {
+                j: fcaps[fi["key"]]
+                for j, fi in enumerate(imgs)
+                if fi.get("key") in fcaps
+            }
+            if not got:  # 一张都没看成：这段转发什么都不加（AstrBot 怎么给的就怎么样）
+                continue
+            fw_caps += list(got.values())
+            self._today()["fwd"] += len(got)
+            text = forward_lines(
+                who, rows, imgs, got, quoted=src == "quoted", total=total
+            )
+            if remember and "fw:" + ref["id"] not in given:
+                keep_fw.append(text)
+                given["fw:" + ref["id"]] = now
+            else:
+                temp_fw.append(text)
+        all_caps = list(caps.values()) + fw_caps
         # 一张都没看成、对话模型自己也看不到这些图（它看不了图 / 图不在这条消息里）：别给提示，不然它以为自己看到了
-        if not caps and not (
-            main_sees and any(src in ("here", "quoted") for _im, src in items)
+        if not all_caps and not (
+            main_sees
+            and (
+                any(src in ("here", "quoted") for _im, src in items)
+                or any(src == "quoted" for _r, src, *_x in loaded)
+            )
         ):
             return
-        if keep_items:
+        if keep_items or keep_fw:
             req.extra_user_content_parts.append(
-                _part(caption_block(keep_items), temp=False)
+                _part(caption_block(keep_items, keep_fw), temp=False)
             )
-        tail = caption_block(temp_items)
+        tail = caption_block(temp_items, temp_fw)
         if self._c("hints", True):
             tail = (tail + "\n\n" if tail else "") + hints_block(
-                list(caps.values()), blind=not main_sees
+                all_caps, blind=not main_sees
             )
         if tail:
             req.extra_user_content_parts.append(_part(tail, temp=True))
@@ -578,8 +823,26 @@ class FatfishSeeMeme(Star):
         self._save()
         logger.info(
             f"{TAG} 这一轮带上了 {len(caps)} 张图的看懂结果"
+            + (f"、转发的聊天记录里 {len(fw_caps)} 张" if loaded else "")
             + ("（主模型自己也看得到图）" if main_sees else "")
         )
+
+    async def _collect(self, tasks, timeout, what="看图"):
+        """等这些图看完（最多 timeout 秒）→ {凭据: 看懂的}；没看完的接着看（看完存着 下次直接用）"""
+        if not tasks:
+            return {}
+        done, pending = await asyncio.wait(list(tasks.values()), timeout=timeout)
+        if pending:
+            self._warn_once(
+                "timeout" + what,
+                f"{what}超过 {timeout} 秒 这一轮先不带没看完的（{len(pending)} 张）",
+                60,
+            )
+        return {
+            k: t.result()
+            for k, t in tasks.items()
+            if t in done and not t.cancelled() and t.exception() is None and t.result()
+        }
 
     # ───────── 看一张图 ─────────
     @staticmethod
@@ -698,19 +961,46 @@ class FatfishSeeMeme(Star):
     async def _caption(
         self, im, ctx, umo, sid, background=False, fresh=False, where="", info=None
     ):
+        """看一张图 → 看懂的那句；看不成 → None。
+        先查表情包词典（认好的直接用）→ 再查看过的 → 都没有才真的看（该深度认的这次就深度认）"""
         k = im["key"]
+        sd = self._sd_on() and not fresh
+        if sd:
+            hit = self.stickers.lookup(k)
+            if hit:
+                self._today()["dict"] += 1
+                return hit
+        deep = sd and self.stickers.due(k)
+        fallback = None
         if not fresh:
             hit = self.cache.get(k)
-            if hit:
+            if hit and not deep:
                 self._today()["cached"] += 1
                 return hit
+            fallback = hit  # 该深度认、但这次认不成（没模型 / 到上限 / 出错）：先用以前看过的那句
             if k in self.inflight:
                 return await asyncio.shield(self.inflight[k])
-        st, now = self._today(), time.time()
         fut = asyncio.get_running_loop().create_future()
         if not fresh:
             self.inflight[k] = fut
-        path, junk, cap = None, [], None
+        cap = None
+        try:
+            cap = await self._look(
+                im, ctx, umo, sid, background, fresh, where, info, deep
+            )
+            if cap is None:
+                cap = fallback
+            return cap
+        finally:
+            if self.inflight.get(k) is fut:
+                self.inflight.pop(k, None)
+            if not fut.done():
+                fut.set_result(cap)
+
+    async def _look(self, im, ctx, umo, sid, background, fresh, where, info, deep):
+        k = im["key"]
+        st, now = self._today(), time.time()
+        path, junk = None, []
         try:
             pid = await self._vision_pid(umo)
             if not pid:
@@ -728,12 +1018,19 @@ class FatfishSeeMeme(Star):
                 self._err(f"图拿不到：{str(im['ref'])[:80]}")
                 return None
             md5 = "m:" + hashlib.md5(Path(path).read_bytes()).hexdigest()
-            if not fresh:
+            if self._sd_on() and not fresh:
+                hit = self.stickers.lookup(
+                    md5
+                )  # 内容一样、换了个文件名 / 网址的：词典里认好过就直接用
+                if hit:
+                    self.stickers.link(k, md5)
+                    st["dict"] += 1
+                    return hit
+            if not fresh and not deep:
                 hit = self.cache.get(md5)
                 if hit:
                     self.cache.put([k], hit)
                     st["cached"] += 1
-                    cap = hit
                     return hit
             while self.hour and now - self.hour[0] > 3600:
                 self.hour.popleft()
@@ -758,11 +1055,16 @@ class FatfishSeeMeme(Star):
                 note=note,
                 kind=im.get("kind") or "",
                 max_chars=self._c("max_chars", 180),
+                deep=deep,
+                usage=self.stickers.usage(k) if deep else (),
             )
             if info is not None:
                 info.update(prompt=prompt, model=pid, avatar=bool(ref))
             self.hour.append(now)
             st["n"] += 1
+            if deep:
+                st["deep"] += 1
+                self.stickers.started(now)
             resp = await asyncio.wait_for(
                 self.context.llm_generate(
                     chat_provider_id=pid,
@@ -777,9 +1079,13 @@ class FatfishSeeMeme(Star):
             st["tokens"] += used
             if info is not None:
                 info["tokens"] = used
-            cap = trim(text, self._c("max_chars", 180) + 80)
-            if cap and note and not cap.startswith("动图"):
-                cap = "动图：" + cap
+            entry = None
+            if deep:
+                cap, entry = self._deep_cap(text, im, montage)
+            else:
+                cap = trim(text, self._c("max_chars", 180) + 80)
+                if cap and note and not cap.startswith("动图"):
+                    cap = "动图：" + cap
             if not cap:
                 self._err("模型没回描述")
                 return None
@@ -788,6 +1094,13 @@ class FatfishSeeMeme(Star):
                 if info is not None:
                     info["error"] = f"看图模型没看，它说：{cap[:80]}"
                 return None
+            if entry:
+                entry = dict(entry, cap=cap, t=int(time.time()))
+                self.stickers.put_deep(k, entry, also=[md5])
+                if not self.stickers.usable({"deep": entry}):
+                    logger.info(
+                        f"{TAG} [表情包词典] 把握不够（{entry.get('conf')}），这次照用、不拿来当词条"
+                    )
             if not fresh:
                 self.cache.put([k, md5], cap)
             self.recent_caps.append(
@@ -796,15 +1109,16 @@ class FatfishSeeMeme(Star):
                     "who": im.get("sender") or "",
                     "cap": cap,
                     "bg": bool(background),
+                    "deep": bool(deep),
                     "where": where,
                     "model": pid,
                     "tokens": used,
                 }
             )
             self._save(
-                force=True
+                force=True, sd=bool(entry)
             )  # 看一张图要花钱：看完马上存（AstrBot 被直接关掉也不丢）
-            logger.info(f"{TAG} {cap[:120]}")
+            logger.info(f"{TAG} {'[表情包词典] ' if deep else ''}{cap[:120]}")
             return cap
         except asyncio.TimeoutError:
             self._err("看图超时")
@@ -816,12 +1130,21 @@ class FatfishSeeMeme(Star):
             self._warn_once("fail", f"看图失败：{e!r}"[:200], 60)
             return None
         finally:
-            if self.inflight.get(k) is fut:
-                self.inflight.pop(k, None)
-            if not fut.done():
-                fut.set_result(cap)
             for j in junk:
                 Path(j).unlink(missing_ok=True)
+
+    def _deep_cap(self, text, im, montage):
+        """深度认的回复 → (给机器人看的那句, 词条)；模型拒绝了 → (它说的, None) 留给外面判；拆不出 → ("", None)"""
+        if refused(trim(text)):
+            return trim(text), None
+        entry = parse_deep(text)
+        if not entry:
+            return "", None
+        cap = trim(
+            deep_caption(entry, kind=im.get("kind") or "", anim=montage),
+            self._c("max_chars", 180) + 140,
+        )
+        return cap, entry
 
     # ───────── 面板 ─────────
     def _register_web(self):
@@ -860,6 +1183,11 @@ class FatfishSeeMeme(Star):
                 "daily": self._c("daily_max", 300),
                 "hourly": self._c("hourly_max", 60),
             },
+            "stickers": {
+                "on": self._sd_on(),
+                **self.stickers.count(),
+                "list": self.stickers.listing(10),
+            },
             "config": {
                 k: self.config.get(k)
                 for k in (
@@ -871,6 +1199,12 @@ class FatfishSeeMeme(Star):
                     "hints",
                     "remember",
                     "also_when_main_sees",
+                    "forward_images",
+                    "forward_max",
+                    "forward_wait_sec",
+                    "sticker_dict",
+                    "sticker_after",
+                    "sticker_daily",
                 )
             },
         }

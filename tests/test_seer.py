@@ -3,6 +3,7 @@
 """seer.py 单独测（不用装 AstrBot）：python tests/test_seer.py [插件目录 默认上一层]"""
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -283,6 +284,336 @@ c2.load({**c.dump(), "bad": {"x": 1}, "bad2": "y"})
 check(
     set(c2.d) == {"f:a", "m:3"}, "存档读回来：坏的跳过、超了只留最近用过的", list(c2.d)
 )
+
+
+def need(*names):
+    """v0.2.0 新加的函数：老代码里没有 → 这一节记成没过（不让整个脚本崩掉）"""
+    miss = [n for n in names if not hasattr(seer, n)]
+    if miss:
+        check(False, "seer.py 里有 " + "、".join(miss), "没有这些函数")
+    return not miss
+
+
+print("\n[8 转发的聊天记录（v0.2.0）]")
+if need("parse_forward", "forward_lines", "forward_nodes", "row_text"):
+    U = "http://img.example/"
+    napcat = {
+        "messages": [
+            {
+                "sender": {"user_id": 1, "nickname": "鲸鱼甲", "card": ""},
+                "message": [
+                    {"type": "text", "data": {"text": "你们看这个"}},
+                    {
+                        "type": "image",
+                        "data": {
+                            "file": "AB12CD34EF56AB12CD34EF56AB12CD34.jpg",
+                            "url": U + "1.png",
+                            "sub_type": 0,
+                        },
+                    },
+                ],
+            },
+            {
+                "sender": {"user_id": 2, "nickname": "鲸鱼乙", "card": "乙乙"},
+                "message": [
+                    {
+                        "type": "image",
+                        "data": {"file": "x.jpg", "url": U + "2.png", "sub_type": 1},
+                    }
+                ],
+            },
+            {
+                "sender": {"nickname": "鲸鱼丙"},
+                "message": [{"type": "forward", "data": {"id": "123"}}],
+            },
+            {"sender": {"nickname": "鲸鱼丁"}, "message": []},
+        ]
+    }
+    rows, imgs = seer.parse_forward(napcat)
+    check(
+        [r["who"] for r in rows] == ["鲸鱼甲", "乙乙", "鲸鱼丙"]
+        and len(imgs) == 2
+        and imgs[0]["ref"] == U + "1.png"
+        and imgs[0]["file"].startswith("AB12")
+        and imgs[0]["kind"] == ""
+        and imgs[1]["kind"] == "表情包"
+        and imgs[1]["row"] == 1,
+        "NapCat 格式：谁发的（群名片优先）、图的地址和文件名、表情包认得出、空消息跳过",
+        (rows, imgs),
+    )
+    check(
+        seer.row_text(rows[2]) == "[聊天记录]"
+        and seer.row_text(rows[0], imgs) == "你们看这个[图片]",
+        "套在里面的转发只写「[聊天记录]」；没看的图照旧「[图片]」",
+        [seer.row_text(r, imgs) for r in rows],
+    )
+    std = {
+        "data": {
+            "message": [
+                {
+                    "type": "node",
+                    "data": {
+                        "nickname": "老张",
+                        "content": "笑死[CQ:image,file=a.jpg,url=http://img.example/3.png&#44;x]",
+                    },
+                },
+                {
+                    "type": "node",
+                    "data": {
+                        "name": "老李",
+                        "content": [
+                            {
+                                "type": "mface",
+                                "data": {
+                                    "summary": "[狗头]",
+                                    "url": U + "4.png",
+                                    "emoji_id": "e1",
+                                },
+                            }
+                        ],
+                    },
+                },
+            ]
+        }
+    }
+    rows2, imgs2 = seer.parse_forward(std)
+    check(
+        [r["who"] for r in rows2] == ["老张", "老李"]
+        and imgs2[0]["ref"] == "http://img.example/3.png,x"
+        and imgs2[1]["kind"] == "QQ 表情「狗头」",
+        "OneBot 标准格式（node）、CQ 码字符串、外面再包一层 data、商城表情",
+        (rows2, imgs2),
+    )
+    check(
+        seer.parse_forward(None) == ([], [])
+        and seer.parse_forward({"messages": "坏的"}) == ([], [])
+        and seer.forward_nodes([{"a": 1}]) == [{"a": 1}],
+        "读不出来的：空着，不报错",
+    )
+    fl = seer.forward_lines(
+        "老王", rows, imgs, {1: "画面：一只猫。梗：猫猫震惊"}, total=4
+    )
+    check(
+        fl.startswith("- 「老王」转发的聊天记录（4 条）：")
+        and "  鲸鱼甲: 你们看这个[图片]" in fl
+        and "  乙乙: [表情包：画面：一只猫。梗：猫猫震惊]" in fl
+        and seer.fields([fl])["梗"] == ["猫猫震惊"],
+        "排成一段：看懂的写进那一行，没看成的照旧；「这一轮怎么接」拆得出梗",
+        fl,
+    )
+    many = [{"who": f"人{i}", "parts": ["一句话" * 10]} for i in range(30)]
+    fl2 = seer.forward_lines("老王", many, [], {}, quoted=True, max_chars=300)
+    check(
+        fl2.startswith("- 引用的那条「老王」转发的聊天记录（30 条）")
+        and len(fl2) < 420
+        and "后面还有" in fl2,
+        "太长：截断、说后面还有几条；引用的标出来",
+        fl2,
+    )
+    long_row = {"who": "甲", "parts": ["字" * 200, ("img", 0)]}
+    check(
+        len(seer.row_text(long_row, [{}], {}, clip=80)) <= 82,
+        "一行的文字最多 80 字",
+        seer.row_text(long_row, [{}], {}),
+    )
+    pf = seer.build_prompt(
+        ["大肥鱼"],
+        "",
+        {
+            "sender": "鲸鱼甲",
+            "to_bot": True,
+            "via": "转发的聊天记录",
+            "said": "你们看这个",
+            "chat": ["鲸鱼乙: 前面一句"],
+            "place": "QQ 群",
+        },
+    )
+    check(
+        pf.startswith("这是 QQ 群里有人发的转发的聊天记录中「鲸鱼甲」发的一张图")
+        and "聊天记录里这条消息的字：「你们看这个」" in pf
+        and "聊天记录里这张图前面几句：鲸鱼乙: 前面一句" in pf
+        and "让看不到图的机器人也能接话" in pf,
+        "看转发里的图：告诉看图模型这是转发的聊天记录里谁发的、前面几句",
+        pf[:400],
+    )
+    cb2 = seer.caption_block([], [fl])
+    check(
+        cb2.startswith(seer.HEAD) and fl in cb2 and seer.caption_block([], []) == "",
+        "「看到了什么」里能只有转发那段",
+        cb2,
+    )
+
+print("\n[9 表情包词典：深度认（v0.2.0）]")
+if need("parse_deep", "deep_caption", "deep_rules"):
+    pd = seer.build_prompt(
+        ["大肥鱼"],
+        "",
+        {"sender": "老王", "place": "QQ 群"},
+        kind="表情包",
+        deep=True,
+        usage=["之前：今天又加班 / 好累；发图的人说：裂开", "之前：（没人说话）"],
+        note="动图（按顺序抽了几帧拼成一张）",
+    )
+    check(
+        seer.DEEP_TAG in pd
+        and "逐字照抄" in pd
+        and "梗：" in pd
+        and "一般用来：" in pd
+        and "把握：" in pd
+        and "- 之前：今天又加班 / 好累；发图的人说：裂开" in pd
+        and "当成一个动作过程" in pd
+        and "让看不到图的机器人也能接话" not in pd
+        and pd.startswith("这是 QQ 群里「老王」发的一张表情包"),
+        "深度认的提示：逐字抄字、梗 / 出处、一般什么时候发、把握、群里真人怎么用它、动图",
+        pd,
+    )
+    raw = (
+        "<think>想想</think>名字：熊猫头裂开\n字：「我裂开了」\n画面：熊猫头的脸裂成两半\n"
+        "梗：熊猫头表情包系列\n意思：崩溃、无语\n一般用来：被坑了、心态崩了的时候\n跟你：无\n坑：没有\n把握：85"
+    )
+    e = seer.parse_deep(raw)
+    check(
+        e
+        and e["name"] == "熊猫头裂开"
+        and e["text"] == "我裂开了"
+        and e["meme"] == "熊猫头表情包系列"
+        and e["usage"].startswith("被坑了")
+        and e["you"] == ""
+        and e["trap"] == ""
+        and e["conf"] == 85,
+        "拆词条：一行一项、去掉 <think>、「无」「没有」算空、把握是数",
+        e,
+    )
+    e2 = seer.parse_deep(
+        "名字：鞠躬猫。字：无。画面：一只猫鞠躬。梗：不确定。意思：道歉。一般用来：认错的时候。跟你：图里的猫戴着机器人的发卡。把握：30分"
+    )
+    check(
+        e2
+        and e2["name"] == "鞠躬猫"
+        and e2["text"] == ""
+        and e2["meme"] == ""
+        and e2["you"].startswith("图里的猫")
+        and e2["conf"] == 30,
+        "写成一行也拆得开；「不确定」的梗算空",
+        e2,
+    )
+    check(
+        seer.parse_deep("抱歉，我无法查看图片") is None and seer.parse_deep("") is None,
+        "什么都没写出来 → None",
+    )
+    dc = seer.deep_caption(e, kind="表情包")
+    check(
+        dc.startswith("表情包「熊猫头裂开」：字：「我裂开了」。画面：")
+        and "一般用来：被坑了" in dc
+        and seer.fields([dc])["梗"] == ["熊猫头表情包系列"]
+        and not seer.fields([dc])["跟你"],
+        "词条 → 给机器人看的那句（梗拆得出来，没关系的「跟你」不写）",
+        dc,
+    )
+    dc2 = seer.deep_caption(e2, anim=True)
+    check(
+        dc2.startswith("常见的图「鞠躬猫」（动图）：")
+        and "梗：看不出出处" in dc2
+        and seer.fields([dc2])["跟你"] == ["图里的猫戴着机器人的发卡"]
+        and not seer.fields([dc2])["梗"],
+        "认不出的梗写「看不出出处」（不当梗点）；图在说它照样拆得出",
+        dc2,
+    )
+
+print("\n[10 表情包词典：记几次、什么时候认、存档（v0.2.0）]")
+if need("StickerDict"):
+    T = 1_800_000_000.0
+    sd = seer.StickerDict(after=3, daily=2, keep=50)
+    check(
+        not sd.seen("f:A", "g1", "u1", before=["前一句"], said="哈", now=T)
+        and not sd.seen("f:A", "g2", "u2", now=T + 10),
+        "前两次：不认",
+    )
+    sd.after_msg("g2", "u2", "自己接自己不算", now=T + 11)
+    sd.after_msg("g2", "u3", "笑死", now=T + 12)
+    sd.after_msg("g2", "u4", "第二句不算", now=T + 13)
+    check(
+        sd.seen("f:A", "g1", "u3", now=T + 20)
+        and sd.get("f:A")["n"] == 3
+        and sd.get("f:A")["convs"] == ["g1", "g2"],
+        "同一张第 3 次（换群也算）：该认了",
+    )
+    us = sd.usage("f:A")
+    check(
+        us[0] == "之前：前一句；发图的人说：哈"
+        and us[1].endswith("之后有人接：笑死")
+        and len(us) == 3,
+        "群里真人发它前后在说什么（发完 60 秒内别人接的第一句）",
+        us,
+    )
+    sd.seen("f:B", "g1", "u1", now=T)
+    check(not sd.due("f:B", T), "普通的图第一次直接发给机器人：不认")
+    check(
+        sd.seen("f:S", "g1", "u1", to_bot=True, sticker=True, now=T)
+        and not seer.StickerDict().seen("f:S", "g1", "u1", sticker=True, now=T),
+        "表情包直接发给机器人：第一次就认；没发给它的不急",
+    )
+    sd.started(T)
+    sd.started(T)
+    check(not sd.due("f:A", T), "每天深度认的张数到上限：先不认")
+    check(sd.due("f:A", T + 86400), "第二天又能认了")
+    sd.put_deep("f:A", {**e, "cap": dc, "t": int(T)}, also=["m:md5a"])
+    check(
+        not sd.due("f:A", T + 86400)
+        and sd.lookup("f:A") == dc
+        and sd.lookup("nope", "m:md5a") == dc
+        and sd.get("f:A")["n"] == 3,
+        "认好了：按凭据 / 图片内容的 md5 都查得到；不再认",
+    )
+    sd.put_deep("f:S", {**e2, "cap": dc2})
+    check(sd.lookup("f:S") is None, "把握不够的词条：不拿来用")
+    sd.link("u:zzz", "m:md5a")
+    check(sd.lookup("u:zzz") == dc, "内容一样的另一张（别的凭据）：用同一条")
+    sd.seen("f:A", "g3", "u9", now=T + 30)
+    check(
+        sd.get("f:A")["n"] == 4 and sd.lookup("m:md5a") == dc,
+        "认好以后再见到：照样记次数、词条还在",
+    )
+    cnt = sd.count(T)
+    check(
+        cnt["known"] == 1 and cnt["tracked"] == 3 and cnt["today"] == 2,
+        "数：记着几张、认好几张、今天认了几张",
+        cnt,
+    )
+    sd2 = seer.StickerDict(keep=50)
+    sd2.load(
+        json.loads(
+            json.dumps(
+                {**sd.dump(), "junk": 1, "alias": {**sd.dump()["alias"], "x": "gone"}}
+            )
+        )
+    )
+    check(
+        sd2.lookup("m:md5a") == dc
+        and sd2.lookup("u:zzz") == dc
+        and "x" not in sd2.alias
+        and sd2.get("f:A")["n"] == 4,
+        "存档读回来：词条、别名都在；指向没了的别名扔掉",
+    )
+    sd3 = seer.StickerDict(keep=10)
+    sd3.put_deep("f:keep", {**e, "cap": dc})
+    for i in range(12):
+        sd3.seen(f"f:{i}", "g", "u", now=T + i)
+    sd3.seen("f:11", "g", "u", now=T + 99)
+    check(
+        len(sd3.items) == 10
+        and sd3.lookup("f:keep") == dc
+        and "f:11" in sd3.items
+        and "f:0" not in sd3.items,
+        "太多了：先扔只见过一次、最久没见的；认好的留着",
+        sorted(sd3.items),
+    )
+    lst = sd.listing()
+    check(
+        len(lst) == 1 and lst[0]["name"] == "熊猫头裂开" and lst[0]["n"] == 4,
+        "面板用的列表：认好的那几条",
+        lst,
+    )
 
 ok = sum(1 for c, _ in RES if c)
 bad = [m for c, m in RES if not c]

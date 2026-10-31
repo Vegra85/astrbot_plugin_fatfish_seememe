@@ -63,6 +63,8 @@
   <div class="card"><b id="n-tokens">-</b><span>今天看图用掉的 token</span></div>
   <div class="card"><b id="n-cache">-</b><span>记住的图</span></div>
   <div class="card"><b id="n-errors">-</b><span>今天出错</span></div>
+  <div class="card"><b id="n-stickers">-</b><span>表情包词典认好的（记着 <i id="n-tracked">-</i> 张）</span></div>
+  <div class="card"><b id="n-dict">-</b><span>今天直接用了词典（深度认 <i id="n-deep">-</i> 次）</span></div>
 </div>
 <p class="info">看图模型：<b id="i-vision">-</b> · 对话模型自己能看图：<b id="i-main">-</b> · 认自己用的名字：<b id="i-names">-</b></p>
 
@@ -88,6 +90,10 @@
 
 <h2>最近看懂的图</h2>
 <div class="list" id="recent"></div>
+
+<h2>表情包词典 <span class="muted" style="font-size:12px;font-weight:400" id="sd-off"></span></h2>
+<p class="muted" style="margin:0 0 8px;font-size:13px">同一张图在群里出现第 3 次、或者有人直接拿表情包找机器人，就认真认一次记下来；以后见到直接用，不再花钱看。下面是最近认好的。</p>
+<div class="list" id="stickers"></div>
 
 <h2>出错记录</h2>
 <ul class="log" id="log"></ul>
@@ -115,13 +121,23 @@
     $("n-tokens").textContent = t.tokens || 0;
     $("n-cache").textContent = d.cache || 0;
     $("n-errors").textContent = t.errors || 0;
+    const sd = d.stickers || {};
+    $("n-stickers").textContent = sd.known || 0;
+    $("n-tracked").textContent = sd.tracked || 0;
+    $("n-dict").textContent = t.dict || 0;
+    $("n-deep").textContent = t.deep || 0;
+    $("sd-off").textContent = sd.on === false ? "（已关掉）" : "";
+    $("stickers").innerHTML = (sd.list || []).map((r) => '<div class="item"><div class="meta"><span>' + ago(r.t) + "</span>" +
+      '<span class="who">' + esc(r.name || "") + "</span><span>见过 " + esc(r.n) + " 次 · " + esc(r.groups) + " 个群</span>" +
+      '<span class="model">把握 ' + esc(r.conf) + '</span></div><div class="text">' + esc(r.cap) + "</div></div>").join("") ||
+      '<div class="empty">还没有认好的。</div>';
     $("i-vision").textContent = d.vision || "没有";
     $("i-main").textContent = d.main_sees ? "能" : "不能";
     $("i-names").textContent = (d.names || []).join("、") || "还不知道（有人说话以后会自己拿 QQ 昵称）";
     $("warn").style.display = d.vision ? "none" : "block";
     const rows = (d.recent || []).map((r) => '<div class="item"><div class="meta"><span>' + ago(r.t) + "</span><span>" +
       esc(r.where || "") + '</span><span class="who">' + esc(r.who || "") + "</span>" +
-      (r.bg ? '<span class="tag">先看好的</span>' : "") + '<span class="model">' + esc(r.model || "") +
+      (r.bg ? '<span class="tag">先看好的</span>' : "") + (r.deep ? '<span class="tag">收进词典</span>' : "") + '<span class="model">' + esc(r.model || "") +
       (r.tokens ? " · " + esc(r.tokens) + " token" : "") + '</span></div><div class="text">' + esc(r.cap) + "</div></div>");
     $("recent").innerHTML = rows.join("") ||
       '<div class="empty">还没看过图。群里有人 @ 机器人、带着图（或者先发图再 @）就会看。</div>';

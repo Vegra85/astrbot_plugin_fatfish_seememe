@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-端到端测试：真的 AstrBot（4.29.3）+ 这个插件 + 假 QQ 端（假 NapCat 反向 WebSocket）+ 假模型（OpenAI 兼容；「看图」靠认颜色）
+端到端测试：真的 AstrBot（测过 4.29.3、4.29.4）+ 这个插件 + 假 QQ 端（假 NapCat 反向 WebSocket）+ 假模型（OpenAI 兼容；「看图」靠认颜色）
 第一轮：对话模型只认字，看图用另一个模型，带自定义头像对照
   A 带图 @ 机器人：看一次（两张图：头像 + 这张）；回话请求里有看懂的结果和「图在说你」
   B 先发图、再 @：看他刚才发的那张（发图的时候不看）
@@ -17,8 +17,13 @@
 第二轮（重启）：没有能看图的模型 → 带图 @ 照样回、不报错、不乱加；记住的图重启以后还在
 第三轮（重启）：对话模型自己能看图 + 群里的图都先看好 → 没人 @ 的图先看好、之后提起直接用；带图 @ 时对话模型也拿到图本身
 第四轮（重启）：关掉「对话模型能看图时也另外看」→ 带图 @ 不另外看、只给通用提示；先发图再 @ 照样看
+v0.2.0 新加：
+  M 转发的聊天记录里的图：先转发、再 @ → 最多看 6 张、一起看、限时（没看完 / 超出的照旧「[图片]」）；
+    引用一条转发 @；转发里没图不加；消息段里直接带着内容的转发（不用再去拿）；记进聊天记录
+  L 表情包词典：同一张图第 3 次出现 → 后台深度认（带上群里真人怎么用它）→ 以后见到直接用词条、不再看；
+    表情包直接发给机器人 → 第一次就深度认（G 那两张）；重启以后词典还在（第二轮）；关掉词典 / 关掉看转发（第四轮）
 用法：python tests/e2e_astrbot.py [插件目录 默认上一层] [--keep] [--dump]（--dump：打印 A 里发给两个模型的原话）
-  需要装了 astrbot（测过 4.29.3）的 Python，astrbot 命令在 PATH 里；另外要 aiohttp、pyjwt、websockets、Pillow（装 astrbot 时都会带上）
+  需要装了 astrbot（测过 4.29.3、4.29.4）的 Python，astrbot 命令在 PATH 里；另外要 aiohttp、pyjwt、websockets、Pillow（装 astrbot 时都会带上）
   只在临时文件夹里跑：模型是假的、QQ 端是假的，不连外网
 """
 
@@ -50,6 +55,7 @@ PLUGIN_SRC = Path(
 KEEP = "--keep" in sys.argv
 PNAME = PLUGIN_SRC.name
 SELF, HUMAN, HUMAN2, HUMAN3, OTHER = 99999, 30001, 30002, 30003, 50005
+FA, FB, FC, FD = 40001, 40002, 40003, 40004  # 转发的聊天记录里的人
 G1, G2, G3 = 7001, 7002, 7003
 HEAD = "[看图看懂]"
 HINT = "# 这一轮怎么接"
@@ -99,6 +105,21 @@ COLORS = {
     "white": (255, 255, 255),
     "navy": (0, 0, 110),
     "olive": (110, 110, 0),
+    # v0.2.0：表情包词典、转发的聊天记录用的
+    "lime": (150, 255, 0),
+    "maroon": (110, 0, 30),
+    "indigo": (60, 0, 130),
+    "coral": (255, 90, 70),
+    "khaki": (190, 180, 120),
+    "plum": (200, 150, 220),
+    "salmon": (250, 170, 140),
+    "mint": (150, 250, 190),
+    "sky": (120, 190, 255),
+    "rust": (180, 60, 10),
+    "slate": (70, 90, 110),
+    "beige": (230, 220, 190),
+    "forest": (20, 90, 30),
+    "lilac": (170, 140, 250),
 }
 CAPS = {
     "red": "字：「给token」。画面：一条胖鱼抱着一堆金币。梗：「给X什么都做」网络模板。跟你：图里的胖鱼就是大肥鱼的 Q 版。坑：没有，纯属玩梗",
@@ -114,8 +135,30 @@ CAPS = {
     "teal": "画面：一条蓝绿色的鱼在吐泡泡。梗：看不出出处",
     "navy": "画面：深夜加班的工位。梗：「福报」",
     "white": "抱歉，我无法查看这张图片。",
+    "lime": "字：「摸鱼中」。画面：一条鱼躺在键盘上。梗：上班摸鱼",
+    "indigo": "画面：一张夜空截图。梗：看不出出处",
+    "coral": "字：「下班」。画面：一个人冲出公司大门。梗：打工人下班",
+    "khaki": "画面：一只骆驼在沙漠里走。梗：看不出出处",
+    "plum": "字：「无语」。画面：一个翻白眼的表情。梗：无语子",
+    "salmon": "画面：一盘三文鱼刺身。梗：看不出出处",
+    "mint": "画面：一杯薄荷绿的奶茶。梗：看不出出处",
+    "sky": "画面：蓝天白云。梗：看不出出处",
+    "rust": "画面：一辆生锈的自行车。梗：看不出出处",
+    "lilac": "字：「收到」。画面：一只敬礼的猫。梗：猫猫敬礼",
 }
-SLOW = {"navy": 6}  # 这张图假模型要看 6 秒（回话最多等 3 秒）
+SLOW = {"navy": 6, "rust": 6}  # 这些图假模型要看 6 秒（回话最多等 3 秒）
+DEEP_NAMES = {"lime": "摸鱼鱼", "gray": "我裂开了", "brown": "狗头"}
+
+
+def deep_reply(color):
+    """假模型「深度认」（表情包词典）的回复：普通看图结果前面加名字、后面加意思 / 一般用来 / 把握"""
+    base = CAPS.get(color, "画面：看不清")
+    if base.startswith("抱歉"):
+        return base
+    return (
+        f"名字：{DEEP_NAMES.get(color, color + '图')}。{base}。"
+        f"意思：{color}的意思。一般用来：想表达{color}的时候。把握：80"
+    )
 
 
 def make_images():
@@ -182,7 +225,8 @@ async def chat_completions(request):
     msgs = body.get("messages") or []
     last = msgs[-1] if msgs else {}
     prompt = text_of(last)
-    if "让看不到图的机器人也能接话" in prompt:
+    deep = "表情包词典" in prompt
+    if "让看不到图的机器人也能接话" in prompt or deep:
         colors = [color_of(u) for u in images_in(last)]
         if colors and colors[-1] in SLOW:
             await asyncio.sleep(SLOW[colors[-1]])
@@ -192,9 +236,11 @@ async def chat_completions(request):
                 "prompt": prompt,
                 "colors": colors,
                 "t": time.time(),
+                "deep": deep,
             }
         )
-        text = CAPS.get(colors[-1] if colors else "", "画面：看不清")
+        c = colors[-1] if colors else ""
+        text = deep_reply(c) if deep else CAPS.get(c, "画面：看不清")
     else:
         chat_calls.append(
             {"model": body.get("model"), "messages": msgs, "t": time.time()}
@@ -251,7 +297,13 @@ class FakeQQ:
             HUMAN2: "小李",
             HUMAN3: "阿珍",
             OTHER: "路人",
+            FA: "鲸鱼甲",
+            FB: "鲸鱼乙",
+            FC: "鲸鱼丙",
+            FD: "鲸鱼丁",
         }
+        self.forwards = {}  # 转发的 id -> 里面的消息（NapCat 的格式）
+        self.fwd_calls = []  # 谁来拿过哪段转发（get_forward_msg）
         self.new_sent = asyncio.Event()
 
     async def connect(self):
@@ -321,6 +373,23 @@ class FakeQQ:
                     data = {"user_id": uid, "nickname": self.names.get(uid, str(uid))}
                 elif act == "get_msg":
                     data = self.store.get(int(p.get("message_id") or 0)) or {}
+                elif act == "get_forward_msg":
+                    fid = str(p.get("message_id") or p.get("id") or "")
+                    self.fwd_calls.append(fid)
+                    if fid not in self.forwards:
+                        await self.ws.send(
+                            json.dumps(
+                                {
+                                    "status": "failed",
+                                    "retcode": 1200,
+                                    "data": None,
+                                    "message": "not found",
+                                    "echo": echo,
+                                }
+                            )
+                        )
+                        continue
+                    data = {"messages": self.forwards[fid]}
                 elif act == "get_login_info":
                     data = {"user_id": SELF, "nickname": "大肥鱼"}
                 await self.ws.send(
@@ -341,7 +410,10 @@ class FakeQQ:
         image=None,
         sticker=False,
         mface=None,
+        forward=None,
+        inline=False,
     ):
+        """forward：[(QQ, 说的话, 图, 是不是表情包)] → 一条转发的聊天记录（inline：内容直接带在消息段里）"""
         self.mid += 1
         segs = []
         if quote:
@@ -353,16 +425,31 @@ class FakeQQ:
                 {"type": "text", "data": {"text": (" " if at_bot else "") + text}}
             )
         if image:
+            segs.append(img_seg(image, sticker))
+        if forward:
+            fid = str(7_000_000_000 + self.mid)
+            nodes = []
+            for i, (u, t, im, st) in enumerate(forward):
+                msg = ([{"type": "text", "data": {"text": t}}] if t else []) + (
+                    [img_seg(im, st)] if im else []
+                )
+                nodes.append(
+                    {
+                        "message_id": 500000 + self.mid * 100 + i,
+                        "time": int(time.time()) - 600 + i,
+                        "sender": {
+                            "user_id": u,
+                            "nickname": self.names.get(u),
+                            "card": "",
+                        },
+                        "message": msg,
+                    }
+                )
+            self.forwards[fid] = nodes
             segs.append(
                 {
-                    "type": "image",
-                    "data": {
-                        "file": file_hash(image),
-                        "url": f"http://127.0.0.1:{LLM_PORT}/img/{image}",
-                        "summary": "[动画表情]" if sticker else "",
-                        "sub_type": 1 if sticker else 0,
-                        "file_size": str((IMG / image).stat().st_size),
-                    },
+                    "type": "forward",
+                    "data": {"id": fid, **({"content": nodes} if inline else {})},
                 }
             )
         if mface:
@@ -415,6 +502,19 @@ class FakeQQ:
             except asyncio.TimeoutError:
                 pass
         return []
+
+
+def img_seg(image, sticker=False):
+    return {
+        "type": "image",
+        "data": {
+            "file": file_hash(image),
+            "url": f"http://127.0.0.1:{LLM_PORT}/img/{image}",
+            "summary": "[动画表情]" if sticker else "",
+            "sub_type": 1 if sticker else 0,
+            "file_size": str((IMG / image).stat().st_size),
+        },
+    }
 
 
 def setup_root():
@@ -519,6 +619,7 @@ async def main():
         avatar_url=f"http://127.0.0.1:{LLM_PORT}/img/cyan.png",
         bot_look="蓝头发、戴鱼形发卡的女孩",
         wait_sec=3,
+        forward_wait_sec=3,
     )
     app = web.Application()
     app.router.add_post("/v1/chat/completions", chat_completions)
@@ -753,6 +854,11 @@ async def main():
             "sub_type=1 的图：告诉看图模型这是表情包",
             vc and vc[0]["prompt"][:200],
         )
+        check(
+            vc and vc[0]["deep"] and "表情包「我裂开了」" in text_of(last_user(chat)),
+            "表情包直接发给机器人：第一次就深度认、收进词典（v0.2.0）",
+            text_of(last_user(chat))[-400:],
+        )
 
         # ═════════ J 看得太慢 ═════════
         print("\n[J 看图太慢（超过「回话前最多等」）]")
@@ -795,6 +901,188 @@ async def main():
         )
         check(ok and len(vc) == 1, "也没记住（下次还会再试）", vc)
 
+        # ═════════ M 转发的聊天记录里的图（v0.2.0）═════════
+        print("\n[M 转发的聊天记录里的图]")
+        FW8 = [
+            (FA, "你们看这个", "coral.png", False),
+            (FB, "", "khaki.png", False),
+            (FC, "哈哈哈", None, False),
+            (FD, "", "plum.png", True),
+            (FA, "", "rust.png", False),
+            (FB, "", "salmon.png", False),
+            (FC, "", "mint.png", False),
+            (FD, "", "sky.png", False),
+        ]
+        ok, vc, chat = await turn(qq, G1, HUMAN, forward=FW8, wait=False)
+        check(not ok and not vc, "光发转发（没 @）：不回、也不看", vc)
+        t0 = time.time()
+        ok, vc, chat = await turn(qq, G1, HUMAN, "你看我转发的这个", at_bot=True)
+        took = time.time() - t0
+        cols = sorted(v["colors"][-1] for v in vc)
+        check(
+            ok
+            and cols == sorted(["coral", "khaki", "plum", "salmon", "mint"])
+            and took < 6,
+            f"再 @：转发里的图一起看了（最多 6 张；慢的那张没等它，{took:.1f} 秒就回了）",
+            (cols, took),
+        )
+        fp = next((v["prompt"] for v in vc if v["colors"][-1] == "coral"), "")
+        check(
+            "有人发的转发的聊天记录中「鲸鱼甲」发的一张图" in fp
+            and "聊天记录里这条消息的字：「你们看这个」" in fp
+            and "后来有人找机器人说：「你看我转发的这个」" in fp,
+            "看图模型知道这是转发的聊天记录里谁发的、那条说了什么、后来找机器人说了什么",
+            fp[:500],
+        )
+        pp = next((v["prompt"] for v in vc if v["colors"][-1] == "plum"), "")
+        check(
+            "发的一张表情包" in pp and "聊天记录里这张图前面几句：" in pp,
+            "转发里的表情包认得出；前面几句给了看图模型",
+            pp[:500],
+        )
+        lu = text_of(last_user(chat))
+        check(
+            HEAD in lu
+            and "「老王」转发的聊天记录（8 条）" in lu
+            and "鲸鱼甲: 你们看这个[图片：字：「下班」" in lu
+            and "鲸鱼丁: [表情包：字：「无语」" in lu
+            and "鲸鱼丙: 哈哈哈" in lu,
+            "回话请求里有那段转发：谁说了什么、看懂的图写进那一行",
+            lu[-1500:],
+        )
+        check(
+            "鲸鱼甲: [图片]" in lu and "鲸鱼丁: [图片]" in lu and "生锈" not in lu,
+            "没看完的（太慢）和超出 6 张的：照旧「[图片]」",
+            lu[-1500:],
+        )
+        check(
+            "梗点：打工人下班" in lu and HINT in lu,
+            "「这一轮怎么接」里有转发里的图的梗点",
+            lu[-800:],
+        )
+        await asyncio.sleep(4)  # 慢的那张接着看完
+        ok, vc, chat = await turn(qq, G1, HUMAN, "还有呢", at_bot=True)
+        lu = text_of(last_user(chat))
+        check(
+            ok and not vc and "转发的聊天记录" not in lu,
+            "紧接着再 @：刚才那段不再重复给（已经记进聊天记录）",
+            (vc, lu[-400:]),
+        )
+        check(
+            "「老王」转发的聊天记录（8 条）" in history_text(chat),
+            "那段转发记进了聊天记录",
+            history_text(chat)[-800:],
+        )
+
+        await turn(
+            qq, G1, OTHER, forward=[(FB, "这是啥", "indigo.png", False)], wait=False
+        )
+        mid = qq.mid
+        ok, vc, chat = await turn(
+            qq, G1, HUMAN2, "这个记录里的图啥意思", at_bot=True, quote=mid
+        )
+        lu = text_of(last_user(chat))
+        check(
+            ok
+            and [v["colors"][-1] for v in vc] == ["indigo"]
+            and "引用的那条「路人」转发的聊天记录（1 条）" in lu
+            and "鲸鱼乙: 这是啥[图片：画面：一张夜空截图" in lu,
+            "引用一条转发 @：看了里面的图（没去拿群里最近那张）",
+            (vc, lu[-600:]),
+        )
+
+        await turn(
+            qq,
+            G2,
+            HUMAN3,
+            forward=[(FA, "今天吃什么", None, False), (FB, "火锅", None, False)],
+            wait=False,
+        )
+        ok, vc, chat = await turn(qq, G2, HUMAN3, "你怎么看", at_bot=True)
+        check(
+            ok and not vc and HEAD not in text_of(last_user(chat)),
+            "转发里没有图：什么都不加",
+            (vc, text_of(last_user(chat))[-300:]),
+        )
+
+        nf = len(qq.fwd_calls)
+        ok, vc, chat = await turn(
+            qq,
+            G3,
+            HUMAN,
+            "看看这个",
+            at_bot=True,
+            forward=[(FC, "", "lilac.png", False)],
+            inline=True,
+        )
+        check(
+            ok
+            and [v["colors"][-1] for v in vc] == ["lilac"]
+            and "猫猫敬礼" in text_of(last_user(chat))
+            and len(qq.fwd_calls) == nf,
+            "消息段里直接带着内容的转发：直接用，不再去拿",
+            (vc, qq.fwd_calls[nf:]),
+        )
+
+        # ═════════ L 表情包词典（v0.2.0）═════════
+        print("\n[L 表情包词典]")
+        ok, vc, chat = await turn(
+            qq, G1, OTHER, "又在摸鱼", image="lime.png", wait=False
+        )
+        await turn(qq, G1, HUMAN2, "笑死", wait=False)
+        ok2, vc2, _ = await turn(qq, G2, HUMAN3, image="lime.png", wait=False)
+        check(not vc and not vc2, "同一张图第 1、2 次（没人 @）：不看", (vc, vc2))
+        nv = len(vision_calls)
+        await turn(qq, G3, HUMAN, "哈哈", image="lime.png", wait=False)
+        await asyncio.sleep(1.5)
+        dv = [v for v in vision_calls[nv:] if v["colors"][-1:] == ["lime"]]
+        check(
+            len(dv) == 1 and dv[0]["deep"],
+            "第 3 次（换了群也算）：后台深度认了一次",
+            vision_calls[nv:],
+        )
+        dp = dv[0]["prompt"] if dv else ""
+        check(
+            "逐字照抄" in dp
+            and "一般用来：" in dp
+            and "发图的人说：又在摸鱼" in dp
+            and "之后有人接：笑死" in dp,
+            "深度认的提示：逐字抄字、一般什么时候发、群里真人发它前后在说什么",
+            dp[-900:],
+        )
+        ok, vc, chat = await turn(qq, G2, HUMAN2, "这啥", at_bot=True, image="lime.png")
+        lu = text_of(last_user(chat))
+        check(
+            ok
+            and not vc
+            and "常见的图「摸鱼鱼」：字：「摸鱼中」" in lu
+            and "一般用来：想表达lime的时候" in lu,
+            "再见到：直接用词条，不再看",
+            (vc, lu[-600:]),
+        )
+        sj = ROOT / "data" / "plugin_data" / PNAME / "stickers.json"
+        await asyncio.sleep(0.5)
+        try:
+            sd = json.loads(sj.read_text(encoding="utf-8"))
+        except Exception:
+            sd = {}
+        known = [
+            v
+            for v in (sd.get("items") or {}).values()
+            if (v.get("deep") or {}).get("cap")
+        ]
+        check(
+            len(known) >= 3
+            and any(
+                "摸鱼鱼" in v["deep"]["cap"]
+                and v.get("n", 0) >= 3
+                and len(v["convs"]) == 3
+                for v in known
+            ),
+            f"词典存进了 stickers.json（认好 {len(known)} 张：两张直接发给机器人的表情包 + 这张）",
+            str(sd)[:600],
+        )
+
         # ═════════ I 面板接口 ═════════
         print("\n[I 面板接口]")
         async with aiohttp.ClientSession() as s:
@@ -810,6 +1098,18 @@ async def main():
                 f"状态：今天看了 {today.get('n')} 张（假模型收到 {len(vision_calls)} 次）、直接用记住的 {today.get('cached')}、"
                 f"带进回话 {today.get('turns')} 轮",
                 str(d)[:500],
+            )
+            sk = st.get("stickers") or {}
+            check(
+                sk.get("on") is True
+                and sk.get("known", 0) >= 3
+                and any(x.get("name") == "摸鱼鱼" for x in sk.get("list") or [])
+                and today.get("dict", 0) >= 1
+                and today.get("deep", 0) >= 3
+                and today.get("fwd", 0) >= 6,
+                f"状态：表情包词典认好 {sk.get('known')} 张、今天深度认 {today.get('deep')} 次、"
+                f"直接用词典 {today.get('dict')} 次、转发里看懂 {today.get('fwd')} 张",
+                (sk, today),
             )
             check(
                 st.get("vision") == "fakevision"
@@ -930,6 +1230,7 @@ async def main():
                 check(
                     r2.status == 200
                     and "看图看懂梗" in html
+                    and "n-stickers" in html
                     and "bridge-sdk.js" in html,
                     "面板页 HTML 拿得到、AstrBot 插上了桥接脚本",
                     (r2.status, html[:200]),
@@ -985,6 +1286,14 @@ async def main():
             "记住的图重启以后还在（看过的照样用）",
             text_of(last_user(chat))[-300:],
         )
+        ok, vc, chat = await turn(
+            qq, G3, HUMAN2, "这个呢", at_bot=True, image="lime.png"
+        )
+        check(
+            ok and not vc and "常见的图「摸鱼鱼」" in text_of(last_user(chat)),
+            "表情包词典重启以后还在（没有看图模型也照样用词条）",
+            text_of(last_user(chat))[-300:],
+        )
 
         # ═════════ 第三轮：对话模型自己能看图 + 群里的图都先看好 ═════════
         print("\n[第三轮 重启：对话模型自己能看图 + 群里的图都先看好]")
@@ -1037,7 +1346,12 @@ async def main():
         proc.terminate()
         proc.wait(15)
         await qq.ws.close()
-        set_plugin(also_when_main_sees=False, prefetch=False)
+        set_plugin(
+            also_when_main_sees=False,
+            prefetch=False,
+            sticker_dict=False,
+            forward_images=False,
+        )
         proc = subprocess.Popen(
             ["astrbot", "run"], cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT
         )
@@ -1066,6 +1380,23 @@ async def main():
             ok and len(vc) == 1 and vc[0]["colors"][-1] == "black",
             "先发图再 @：AstrBot 不会把那张给对话模型，插件照样看",
             vc,
+        )
+        print("\n[第四轮 关掉表情包词典、关掉看转发里的图]")
+        nv = len(vision_calls)
+        for g, u in ((G1, HUMAN), (G2, HUMAN2), (G3, HUMAN3)):
+            await turn(qq, g, u, image="forest.png", sticker=True, wait=False)
+        await asyncio.sleep(1)
+        check(
+            len(vision_calls) == nv,
+            "关掉词典：同一张表情包发 3 次也不深度认",
+            vision_calls[nv:],
+        )
+        await turn(qq, G2, HUMAN, forward=[(FA, "看", "beige.png", False)], wait=False)
+        ok, vc, chat = await turn(qq, G2, HUMAN, "你说呢", at_bot=True)
+        check(
+            ok and not vc and HEAD not in text_of(last_user(chat)),
+            "关掉看转发：转发里的图不看、什么都不加",
+            (vc, text_of(last_user(chat))[-300:]),
         )
         text = log_text()
         check(

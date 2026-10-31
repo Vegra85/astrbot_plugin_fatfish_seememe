@@ -111,5 +111,47 @@
     "description": "记住多少张看过的图",
     "type": "int",
     "default": 600
+  },
+  "forward_images": {
+    "description": "转发的聊天记录里的图也看",
+    "type": "bool",
+    "default": true,
+    "hint": "有人转发了一段聊天记录、再 @ 机器人（或者引用那条转发）时，把里面的图一起看了，看懂的写进那一行；没看成的照旧「[图片]」。关掉就跟以前一样不看。"
+  },
+  "forward_max": {
+    "description": "转发的聊天记录里最多看几张图",
+    "type": "int",
+    "default": 6,
+    "hint": "一段转发里的图很多时只看前面这么多张（一起看），剩下的照旧「[图片]」。每张都算看图次数（看过的、词典里有的不算）。"
+  },
+  "forward_wait_sec": {
+    "description": "转发里的图最多等多少秒",
+    "type": "int",
+    "default": 25,
+    "hint": "超过这个时间没看完的，这一轮先写「[图片]」；看完会存着，下次直接用。"
+  },
+  "sticker_dict": {
+    "description": "表情包词典",
+    "type": "bool",
+    "default": true,
+    "hint": "同一张图在群里反复出现、或者有人直接拿表情包找机器人时，认真认一次：逐字抄字、是什么梗 / 出处、一般什么时候发（参考群里真人发它前后在说什么），记成词条。以后再见到直接用词条，不再花钱看。跨群共用，重启不丢（存在插件数据目录的 stickers.json）。"
+  },
+  "sticker_after": {
+    "description": "同一张图第几次出现时深度认",
+    "type": "int",
+    "default": 3,
+    "hint": "按 QQ 给的文件名（图片内容的哈希）/ 商城表情的 id 认同一张，换群也算。直接发给机器人的表情包不用等，第一次就认。"
+  },
+  "sticker_daily": {
+    "description": "每天最多深度认几张",
+    "type": "int",
+    "default": 30,
+    "hint": "深度认一张跟看一张图差不多花费（提示词长一点）。也算在每小时 / 每天最多看几张里。"
+  },
+  "sticker_keep": {
+    "description": "表情包词典最多记多少张",
+    "type": "int",
+    "default": 2000,
+    "hint": "满了先扔只见过一次、最久没见的；认好的最后才扔。"
   }
 }
