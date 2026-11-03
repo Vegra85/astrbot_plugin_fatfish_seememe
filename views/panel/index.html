@@ -53,7 +53,7 @@
 </head>
 <body>
 <h1>看图看懂梗</h1>
-<p class="sub">机器人回话前，先把图看懂：图里的字、画面、在玩什么梗、是不是在拿它开涮、有没有坑。再提醒它别复述画面、直接接梗。</p>
+<p class="sub">机器人回话前，先把图看懂：图里的字、画面、在玩什么梗（谐音也按拼音查一遍）、是不是在拿它开涮、有没有坑，写给它看。</p>
 <div class="warn" id="warn">现在没有能看图的模型：插件配置里选「看图用哪个模型」，或者在 AstrBot 的模型设置里给对话模型的「模型能力」勾上「图像」。</div>
 <div id="err"></div>
 <div class="cards">
@@ -66,7 +66,7 @@
   <div class="card"><b id="n-stickers">-</b><span>表情包词典认好的（记着 <i id="n-tracked">-</i> 张）</span></div>
   <div class="card"><b id="n-dict">-</b><span>今天直接用了词典（深度认 <i id="n-deep">-</i> 次）</span></div>
 </div>
-<p class="info">看图模型：<b id="i-vision">-</b> · 对话模型自己能看图：<b id="i-main">-</b> · 认自己用的名字：<b id="i-names">-</b></p>
+<p class="info">看图模型：<b id="i-vision">-</b> · 对话模型自己能看图：<b id="i-main">-</b> · 认自己用的名字：<b id="i-names">-</b> · 谐音：<b id="i-pun">-</b> · 「今天」按：<b id="i-tz">-</b></p>
 
 <h2>试一张图</h2>
 <div class="try" id="try">
@@ -135,6 +135,9 @@
     $("i-main").textContent = d.main_sees ? "能" : "不能";
     $("i-names").textContent = (d.names || []).join("、") || "还不知道（有人说话以后会自己拿 QQ 昵称）";
     $("warn").style.display = d.vision ? "none" : "block";
+    const pn = d.puns || {};
+    $("i-pun").textContent = pn.on === false ? "关着" : (pn.sound ? "开着" : "开着（没装 pypinyin，只按词表里的写法认）");
+    $("i-tz").textContent = d.tz || "-";
     const rows = (d.recent || []).map((r) => '<div class="item"><div class="meta"><span>' + ago(r.t) + "</span><span>" +
       esc(r.where || "") + '</span><span class="who">' + esc(r.who || "") + "</span>" +
       (r.bg ? '<span class="tag">先看好的</span>' : "") + (r.deep ? '<span class="tag">收进词典</span>' : "") + '<span class="model">' + esc(r.model || "") +

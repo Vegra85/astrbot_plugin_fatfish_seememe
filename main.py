@@ -4,13 +4,18 @@
 
 机器人要回话的那一轮，把相关的图（这条消息里的、引用的消息里的、同一个人刚才发的、他说「上面那张图」时群里最近的一张）
 交给能看图的模型，用「字 / 画面 / 梗 / 跟你 / 坑」五样写清楚：图里有没有机器人自己、在玩什么梗、有没有坑；
-再附上「这一轮怎么接」：别复述画面、对梗点做反应、认出图在说自己、看穿坑反挖回去。
-看到了什么会记进聊天记录（以后聊起这张图还记得）；「这一轮怎么接」只给这一轮看。
+再附上「这一轮的图」：梗点、图在不在说它、有没有坑（v0.3.0 起只写事实，不写怎么回）。
+看到了什么会记进聊天记录（以后聊起这张图还记得）；「这一轮的图」只给这一轮看。
 v0.2.0：转发的聊天记录里的图也看（以前只写「[图片]」）；表情包词典（同一张反复出现 / 直接拿表情包找机器人 → 认真认一次记下来，以后直接用）。
+v0.2.1：防伪造 —— 群友在消息里手打「[看图看懂]」「[图片：…]」这类插件自己的标记，标成「他打的字」（seer.neutral_marks）。
+v0.3.0：谐音梗 —— 图里的字按拼音查可能的谐音（puns.py，本地查、不调模型），写在看图结果后面；
+        一条消息里几张图按位置标「第几张」、没看成的也占着位置；「今天」按配置的时区算（默认北京时间）；
+        确认下载到的是图片以后才看、才扣名额；「这一轮的图」只写事实（作者的规矩 E1）。
 """
 
 import asyncio
 import hashlib
+import io
 import json
 import os
 import sys
@@ -25,22 +30,29 @@ from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, StarTools
 import astrbot.api.message_components as Comp
 
+from . import puns
 from .seer import (
+    LATE,
+    MISS,
     TEXT_REFERS,
     Cache,
     StickerDict,
     block,
     build_prompt,
     caption_block,
+    day_of,
     deep_caption,
     forward_lines,
     forward_nodes,
     hints_block,
     key_ok,
+    make_tz,
+    neutral_marks,
     parse_deep,
     parse_forward,
     refused,
     row_text,
+    slot_label,
     trim,
 )
 
@@ -54,7 +66,10 @@ except Exception:
     prepare_model_image = None
 
 PLUGIN_NAME = "astrbot_plugin_fatfish_seememe"
+VERSION = "0.3.0"
 TAG = "[看图]"
+LATE_PRIORITY = -sys.maxsize + 100  # 回话请求的最后一步：防伪造（v0.2.1）
+_MAX_BYTES = 20 * 1024 * 1024  # 自己下图时最多下多大（v0.3.0）
 _MAGIC = (
     (b"\x89PNG", ".png"),
     (b"\xff\xd8\xff", ".jpg"),
@@ -76,6 +91,34 @@ def _ext(data):
         if data[: len(magic)] == magic:
             return ext
     return ".jpg"
+
+
+def _is_image(data=None, path=None):
+    """是不是真的图片（v0.3.0）：文件头对得上、Pillow 打得开。
+    以前 AstrBot 认不出是图时，插件会自己再下一遍、不管是什么都交给看图模型（还扣每天的名额）：过期的链接给的网页、提示页也算一张"""
+    try:
+        if data is not None:
+            head = data[:16]
+        else:
+            with open(path, "rb") as f:
+                head = f.read(16)
+    except Exception:
+        return False
+    ok = any(head[: len(m)] == m for m, _e in _MAGIC)
+    if ok and head[:4] == b"RIFF":
+        ok = head[8:12] == b"WEBP"
+    if not ok:
+        return False
+    try:
+        from PIL import Image
+    except Exception:  # 没有 Pillow（AstrBot 自己就带着，一般不会）：只看文件头
+        return True
+    try:
+        with Image.open(io.BytesIO(data) if data is not None else path) as im:
+            im.verify()
+        return True
+    except Exception:
+        return False
 
 
 def _part(text, temp):
@@ -104,6 +147,15 @@ class FatfishSeeMeme(Star):
             except Exception:
                 pass
         self.state_file = self.data_dir / "state.json"
+        # 按哪个时区算「今天」（v0.3.0，默认北京时间；留空 = 跟服务器，以前的做法）
+        self.tz, self.tz_label, tz_ok = make_tz(
+            self.config.get("day_tz", "Asia/Shanghai")
+        )
+        if not tz_ok:
+            logger.warning(
+                f"{TAG} 认不出时区「{self.config.get('day_tz')}」（Windows 上 Asia/Shanghai 以外的名字要装 tzdata；"
+                "也可以写 UTC+8 这种）：先按北京时间算「今天」"
+            )
         st = self._load()
         self.cache = Cache(self._c("cache_keep", 600))
         self.cache.load(st.get("cache"))
@@ -116,6 +168,7 @@ class FatfishSeeMeme(Star):
             self._c("sticker_after", 3),
             self._c("sticker_daily", 30),
             self._c("sticker_keep", 2000),
+            tz=self.tz,
         )
         self.stickers.load(self._load(self.sticker_file))
         self.stickers.dirty = False
@@ -219,7 +272,7 @@ class FatfishSeeMeme(Star):
         self._save(force=True, sd=True)
 
     def _today(self):
-        day = time.strftime("%Y-%m-%d")
+        day = day_of(None, self.tz)  # v0.3.0：按配置的时区（以前按服务器的时间）
         if self.stats.get("day") != day:
             self.stats = {
                 "day": day,
@@ -262,74 +315,108 @@ class FatfishSeeMeme(Star):
             [s for s in segs if isinstance(s, dict)] if isinstance(segs, list) else []
         )
 
-    def _from_comps(self, comps, sender, uid, t, quoted=False, raws=None, said=""):
-        """raws：和这些图一一对应的原始消息段（QQ 的才有）—— 里面有原来的文件名（图片内容的哈希）、网址、是不是表情包"""
+    def _one(self, c, d, sender, uid, t, quoted=False, said=""):
+        """一张图（AstrBot 的 Image 组件 + 对应的原始消息段 d）→ 要看的那张；没有地址 → None
+        d 里有原来的文件名（图片内容的哈希）、网址、是不是表情包（QQ 的才有）"""
+        ref = c.url or c.file or c.path
+        if not ref:
+            return None
+        alt = str(d.get("url") or "")
+        alt = (
+            alt if alt.startswith("http") and alt != ref else ""
+        )  # 本地那份没了还能再下
+        kind = (
+            "表情包"
+            if str(d.get("sub_type")) == "1" or "表情" in str(d.get("summary") or "")
+            else ""
+        )
+        return {
+            "ref": ref,
+            "alt": alt,
+            "key": self._key(alt or ref, d.get("file") or c.file),
+            "sender": sender,
+            "uid": str(uid),
+            "t": t,
+            "quoted": quoted,
+            "kind": kind,
+            "said": said,
+        }
+
+    def _mface(self, d, sender, uid, t, said=""):
+        """QQ 商城表情（mface，AstrBot 自己会丢掉它）→ 要看的那张；没有网址 → None"""
+        if not str(d.get("url") or "").startswith("http"):
+            return None
+        name = str(d.get("summary") or "").strip("[]")[:20]
+        return {
+            "ref": d["url"],
+            "key": self._key(d["url"], d.get("emoji_id") or ""),
+            "sender": sender,
+            "uid": str(uid),
+            "t": t,
+            "quoted": False,
+            "kind": f"QQ 表情「{name}」" if name else "QQ 表情",
+            "said": said,
+        }
+
+    @staticmethod
+    def _mid(event, t):
+        """这条消息的 id（同一条消息里的几张图算一组，标「第几张」用）"""
+        mid = getattr(getattr(event, "message_obj", None), "message_id", "")
+        return str(mid or "") or f"t{t}"
+
+    def _from_comps(
+        self, comps, sender, uid, t, quoted=False, raws=None, said="", mid=""
+    ):
+        """raws：和这些图一一对应的原始消息段（QQ 的才有）；对不上就都不用
+        每张带上 pos（第几张）、of（一共几张）、mid（哪条消息）—— v0.3.0 按位置配"""
         imgs = [c for c in comps or [] if isinstance(c, Comp.Image)]
         raws = raws if raws is not None and len(raws) == len(imgs) else [{}] * len(imgs)
         out = []
-        for c, d in zip(imgs, raws):
-            ref = c.url or c.file or c.path
-            if not ref:
-                continue
-            alt = str(d.get("url") or "")
-            alt = (
-                alt if alt.startswith("http") and alt != ref else ""
-            )  # 本地那份没了还能再下
-            kind = (
-                "表情包"
-                if str(d.get("sub_type")) == "1"
-                or "表情" in str(d.get("summary") or "")
-                else ""
-            )
-            out.append(
-                {
-                    "ref": ref,
-                    "alt": alt,
-                    "key": self._key(alt or ref, d.get("file") or c.file),
-                    "sender": sender,
-                    "uid": str(uid),
-                    "t": t,
-                    "quoted": quoted,
-                    "kind": kind,
-                    "said": said,
-                }
-            )
+        for pos, (c, d) in enumerate(zip(imgs, raws), 1):
+            im = self._one(c, d, sender, uid, t, quoted, said)
+            if im:
+                im.update(pos=pos, of=len(imgs), mid=mid)
+                out.append(im)
         return out
 
     def _images(self, event, t=None):
-        """这条消息自己带的图（含 QQ 商城表情 mface —— AstrBot 自己会丢掉它）"""
+        """这条消息自己带的图（含 QQ 商城表情 mface —— AstrBot 自己会丢掉它），按消息里的顺序排（v0.3.0）
+        以前：先排完所有普通图、再排商城表情（「[狗头] + 一张截图」排成截图在前）；一条消息里几张图也不分第几张
+        现在：照原始消息段的顺序，每张带上 pos（这条消息里第几张，看不了的也占一个位置）、of（一共几张）、mid（哪条消息）"""
         t = t or time.time()
         sender, uid = (
             event.get_sender_name() or str(event.get_sender_id()),
             str(event.get_sender_id()),
         )
-        segs = self._raw_segs(event)
-        raws = [
-            s.get("data") or {} for s in segs if s.get("type") == "image"
-        ]  # NapCat：sub_type=1 / 「[动画表情]」是表情包
+        segs = self._raw_segs(event)  # NapCat：sub_type=1 / 「[动画表情]」是表情包
         said = self._text(event)
-        out = self._from_comps(
-            event.get_messages(), sender, uid, t, raws=raws if segs else None, said=said
-        )
-        for s in segs:
-            d = s.get("data") or {}
-            if s.get("type") == "mface" and str(d.get("url") or "").startswith("http"):
-                name = str(d.get("summary") or "").strip("[]")[:20]
-                out.append(
-                    {
-                        "ref": d["url"],
-                        "key": self._key(d["url"], d.get("emoji_id") or ""),
-                        "sender": sender,
-                        "uid": uid,
-                        "t": t,
-                        "quoted": False,
-                        "kind": f"QQ 表情「{name}」" if name else "QQ 表情",
-                        "said": said,
-                    }
-                )
+        comps = [c for c in event.get_messages() or [] if isinstance(c, Comp.Image)]
+        raw_imgs = [s for s in segs if s.get("type") == "image"]
+        if segs and len(raw_imgs) == len(comps):
+            order, k = [], 0
+            for s in segs:
+                if s.get("type") == "image":
+                    order.append((comps[k], s.get("data") or {}))
+                    k += 1
+                elif s.get("type") == "mface":
+                    order.append((None, s.get("data") or {}))
+        else:  # 对不上（AstrBot 丢了哪一张）/ 没有原始消息段：普通图在前、商城表情在后（跟以前一样）
+            order = [(c, {}) for c in comps] + [
+                (None, s.get("data") or {}) for s in segs if s.get("type") == "mface"
+            ]
+        mid, out = self._mid(event, t), []
+        for pos, (c, d) in enumerate(order, 1):
+            if c is not None:
+                im = self._one(c, d, sender, uid, t, said=said)
+            else:
+                im = self._mface(d, sender, uid, t, said)
+            if im:
+                im.update(pos=pos, of=len(order), mid=mid)
+                out.append(im)
         return out
 
     def _quoted(self, event):
+        """引用的那条消息里的图（自己算第几张，不跟这条消息的混在一起数）"""
         out = []
         for c in event.get_messages() or []:
             if isinstance(c, Comp.Reply) and c.chain:
@@ -343,23 +430,35 @@ class FatfishSeeMeme(Star):
                     time.time(),
                     quoted=True,
                     said=said,
+                    mid="q" + str(getattr(c, "id", "") or ""),
                 )
         return out
 
     def _relevant(self, event):
         """这一轮要看的图 → [(图, 哪来的)]：这条消息的 / 引用的 → 都没有就看他刚才发的（图和 @ 常常分开发）
-        → 还没有、他又说到「图」了 → 群里最近一张"""
+        → 还没有、他又说到「图」了 → 群里最近一张。
+        每张带上 poss（这张在它那条消息里占的位置；同一张发了两遍就有两个）—— v0.3.0"""
         umo, now, uid = (
             event.unified_msg_origin,
             time.time(),
             str(event.get_sender_id()),
         )
-        out, seen = [], set()
+        out, idx = [], {}
+        most = max(1, self._c("max_images", 3))
 
         def add(im, src):
-            if im["key"] not in seen:
-                seen.add(im["key"])
-                out.append((im, src))
+            k = im["key"]
+            if k in idx:  # 同一张图：同一条消息里发了两遍 → 记下它也占了那个位置
+                o = out[idx[k]][0]
+                if (
+                    im.get("pos")
+                    and o.get("mid") == im.get("mid")
+                    and im["pos"] not in o["poss"]
+                ):
+                    o["poss"].append(im["pos"])
+                return
+            idx[k] = len(out)
+            out.append((dict(im, poss=[im["pos"]] if im.get("pos") else []), src))
 
         try:
             t0 = (
@@ -375,12 +474,16 @@ class FatfishSeeMeme(Star):
             for t, u, _n, im in reversed(self.imgs.get(umo) or []):
                 if now - t <= self._c("recent_sec", 120) and u == uid:
                     add(im, "recent")
+            # v0.3.0：留最近的几张，但按发的顺序排（以前最新的排最前：一条消息里的两张图倒着写）
+            out = sorted(
+                out[:most], key=lambda x: (x[0].get("t") or 0, x[0].get("pos") or 0)
+            )
         if not out and TEXT_REFERS.search(event.message_str or ""):
             for t, _u, _n, im in reversed(self.imgs.get(umo) or []):
                 if now - t <= self._c("refer_sec", 600):
                     add(im, "refer")
                     break
-        return out[: max(1, self._c("max_images", 3))]
+        return out[:most]
 
     def _ctx(self, umo, im, to_bot, ask="", place=""):
         chat = [
@@ -644,9 +747,86 @@ class FatfishSeeMeme(Star):
             self.fwd_cache[fid] = (now, got)
         return got
 
+    # ───────── 谐音（v0.3.0）─────────
+    def _pun_words(self):
+        """配置里自己加的谐音词（「夺笋=多损」「多损」）"""
+        v = self.config.get("pun_words") or []
+        if isinstance(v, str):
+            v = v.replace("，", ",").replace("\n", ",").split(",")
+        return tuple(str(x).strip() for x in v if str(x).strip())[:200]
+
+    def _with_pun(self, cap):
+        """看图结果后面接上谐音：图里的字按读音查到可能的谐音就写上（只写事实：怎么读、可能是哪个词）；
+        没字 / 没查到 / 关掉了 → 原样。不调模型"""
+        if not cap or cap in (MISS, LATE) or not self._c("puns", True):
+            return cap
+        try:
+            n = puns.note(cap, self._pun_words())
+        except Exception as e:
+            self._warn_once("pun", f"查谐音出错（不影响看图）：{e!r}"[:200], 3600)
+            return cap
+        if not puns.ready():
+            self._warn_once(
+                "nopinyin",
+                "没装 pypinyin：谐音只按词表里的写法认（「夺笋」「520」这种），不按读音找。"
+                "装插件时 AstrBot 会按 requirements.txt 自动装；没装上可以在 AstrBot 的环境里 pip install pypinyin",
+                24 * 3600,
+            )
+        return f"{cap}。{n}" if n else cap
+
     # ───────── 要回话了：把看懂的图塞进这一轮 ─────────
+    def _neutralize(self, req, skip=()):
+        """防伪造（v0.2.1）：他说的话、系统提示、请求里别的段落（AstrBot 群聊上下文、别的插件加的）里手打的
+        「[看图看懂]」「[图片：…」→ 标成「他打的字」。skip = 本插件自己加的段落（id），不动。出错不影响看图"""
+        try:
+            n = 0
+            for attr in ("prompt", "system_prompt"):
+                v = getattr(req, attr, None)
+                if isinstance(v, str) and v:
+                    new = neutral_marks(v)
+                    if new != v:
+                        setattr(req, attr, new)
+                        n += 1
+            for part in list(getattr(req, "extra_user_content_parts", None) or []):
+                if id(part) in skip:
+                    continue
+                t = getattr(part, "text", None)
+                if isinstance(t, str) and t:
+                    new = neutral_marks(t)
+                    if new != t:
+                        part.text = new
+                        n += 1
+            if n:
+                logger.info(
+                    f"{TAG} 有人在消息里打了「[看图看懂]」「[图片：…]」这类标记：标成「他打的字」（防伪造）"
+                )
+        except Exception as e:
+            logger.debug(f"{TAG} 防伪造那一步出错（不影响看图）：{e!r}")
+
+    @filter.on_llm_request(priority=LATE_PRIORITY)
+    async def on_llm_req_late(self, event: AstrMessageEvent, req: ProviderRequest):
+        """回话请求的最后一步：防伪造（v0.2.1；AstrBot 的群聊上下文在默认优先级 0 才加进来，所以放到最后）"""
+        if not self._c("enable", True):
+            return
+        self._neutralize(req, set(event.get_extra("fatfish_seememe_parts") or []))
+
     @filter.on_llm_request(priority=50)
     async def on_llm_req(self, event: AstrMessageEvent, req: ProviderRequest):
+        before = {id(p) for p in (getattr(req, "extra_user_content_parts", None) or [])}
+        try:
+            await self._on_llm_req(event, req)
+        finally:
+            mine = [
+                id(p)
+                for p in (getattr(req, "extra_user_content_parts", None) or [])
+                if id(p) not in before
+            ]
+            if (
+                mine
+            ):  # 本插件自己加的段落（看到了什么 / 这一轮的图）：最后防伪造那一步不动
+                event.set_extra("fatfish_seememe_parts", mine)
+
+    async def _on_llm_req(self, event: AstrMessageEvent, req: ProviderRequest):
         if not self._c("enable", True):
             return
         items = self._relevant(event)
@@ -768,13 +948,20 @@ class FatfishSeeMeme(Star):
             self._collect(tasks, self._c("wait_sec", 30)),
             self._collect(fwd_tasks, self._c("forward_wait_sec", 25), "转发里的图"),
         )
+        late = {k for k, t in tasks.items() if not t.done()}  # 超时、还在看的
         fcaps = {**caps, **fcaps}
         keep_items, temp_items, keep_fw, temp_fw, fw_caps = [], [], [], [], []
         for im, src in items:
+            # v0.3.0 按位置配：一条消息里几张图写「3 张图里第 2 张」；看了没看成的也占着位置（写「没看成」，只给这一轮）
+            # 以前没看成的那张直接不写：第一张没看成，第二张的描述就被当成了第一张的
+            label = slot_label(im.get("of"), im.get("poss"))
             cap = caps.get(im["key"])
             if not cap:
+                if im["key"] in tasks:
+                    miss = LATE if im["key"] in late else MISS
+                    temp_items.append((im.get("sender"), miss, src == "quoted", label))
                 continue
-            row = (im.get("sender"), cap, src == "quoted")
+            row = (im.get("sender"), self._with_pun(cap), src == "quoted", label)
             if remember and im["key"] not in given:
                 keep_items.append(row)
                 given[im["key"]] = now
@@ -782,7 +969,7 @@ class FatfishSeeMeme(Star):
                 temp_items.append(row)
         for ref, src, who, rows, imgs, total in loaded:
             got = {
-                j: fcaps[fi["key"]]
+                j: self._with_pun(fcaps[fi["key"]])
                 for j, fi in enumerate(imgs)
                 if fi.get("key") in fcaps
             }
@@ -808,6 +995,8 @@ class FatfishSeeMeme(Star):
             )
         ):
             return
+        if not all_caps:  # 一张都没看懂（对话模型自己看图）：「没看成」那几行也不写
+            temp_items = [r for r in temp_items if r[1] not in (MISS, LATE)]
         if keep_items or keep_fw:
             req.extra_user_content_parts.append(
                 _part(caption_block(keep_items, keep_fw), temp=False)
@@ -876,7 +1065,10 @@ class FatfishSeeMeme(Star):
         return cap or None
 
     async def _prepare(self, ref, max_size=1280):
-        """→ (本地图片路径, 是不是动图拼帧, 用完要删的文件)；拿不到 → (None, False, [])"""
+        """→ (本地图片路径, 是不是动图拼帧, 用完要删的文件)；拿不到 / 不是图片 → (None, False, [])
+        v0.3.0：确认是图片（文件头对得上、Pillow 打得开）才交出去 —— 外面拿到了才扣名额、才调看图模型。
+        以前 AstrBot 认不出是图时，插件会自己再下一遍、不管下到的是什么都当成图（过期链接给的网页也算一张，名额照扣）；
+        图太大 AstrBot 不让交给模型时，也会自己再下一遍绕过去"""
         if prepare_model_image is not None:
             try:
                 got = await prepare_model_image(
@@ -893,9 +1085,16 @@ class FatfishSeeMeme(Star):
                         junk.append(orig)  # 下载下来的原图也是这次的临时文件
                     return path, bool(montage), junk
             except Exception as e:
+                # 太大（ImageInputTooLargeError）：AstrBot 不让交给模型，别自己再下一遍绕过去
+                if type(e).__name__ == "ImageInputTooLargeError":
+                    self._warn_once(
+                        "big", "图太大（AstrBot 不让交给模型）这张不看", 600
+                    )
+                    return None, False, []
                 self._warn_once(
                     "prep", f"准备图片失败（AstrBot 的处理）：{e!r}"[:200], 60
                 )
+        # AstrBot 没拿到（老版本没有 prepare_model_image / 网络抖了）：自己下一遍，下到的得是图片
         if str(ref).startswith("http"):
             try:
                 import aiohttp
@@ -904,7 +1103,9 @@ class FatfishSeeMeme(Star):
                     async with s.get(ref, timeout=aiohttp.ClientTimeout(total=20)) as r:
                         if r.status != 200:
                             return None, False, []
-                        data = await r.read()
+                        data = await r.content.read(_MAX_BYTES + 1)
+                if len(data) > _MAX_BYTES or not _is_image(data):
+                    return None, False, []  # 太大 / 不是图片（网页、提示页）：不看
                 fd, name = tempfile.mkstemp(
                     prefix="img_", suffix=_ext(data), dir=self.tmp_dir
                 )
@@ -914,7 +1115,9 @@ class FatfishSeeMeme(Star):
             except Exception:
                 return None, False, []
         p = str(ref)[7:] if str(ref).startswith("file://") else str(ref)
-        return (p, False, []) if os.path.isfile(p) else (None, False, [])
+        if os.path.isfile(p) and _is_image(path=p):
+            return p, False, []
+        return None, False, []
 
     async def _avatar_ref(self, sid):
         """机器人自己的头像（给看图的模型对照「图里是不是它」）"""
@@ -1014,8 +1217,10 @@ class FatfishSeeMeme(Star):
             path, montage, junk = await self._prepare(im["ref"])
             if not path and im.get("alt"):
                 path, montage, junk = await self._prepare(im["alt"])
-            if not path:
-                self._err(f"图拿不到：{str(im['ref'])[:80]}")
+            if not path:  # v0.3.0：下不来 / 不是图片 —— 名额没扣、也没调看图模型
+                self._err(f"图拿不到或者不是图片：{str(im['ref'])[:80]}")
+                if info is not None:
+                    info["error"] = "图拿不到或者不是图片"
                 return None
             md5 = "m:" + hashlib.md5(Path(path).read_bytes()).hexdigest()
             if self._sd_on() and not fresh:
@@ -1188,6 +1393,13 @@ class FatfishSeeMeme(Star):
                 **self.stickers.count(),
                 "list": self.stickers.listing(10),
             },
+            "puns": {  # v0.3.0
+                "on": bool(self._c("puns", True)),
+                "sound": puns.ready(),
+                "how": puns.how(),
+            },
+            "tz": self.tz_label,
+            "version": VERSION,
             "config": {
                 k: self.config.get(k)
                 for k in (
@@ -1205,6 +1417,9 @@ class FatfishSeeMeme(Star):
                     "sticker_dict",
                     "sticker_after",
                     "sticker_daily",
+                    "puns",
+                    "pun_words",
+                    "day_tz",
                 )
             },
         }
@@ -1270,7 +1485,10 @@ class FatfishSeeMeme(Star):
                 "status": "ok",
                 "data": {
                     "caption": cap,
-                    "block": block([("面板测试", cap, False)], True),
+                    "block": block(
+                        [("面板测试", self._with_pun(cap), False)],
+                        self._c("hints", True),
+                    ),
                     "prompt": info.get("prompt", ""),
                     "model": info.get("model", ""),
                     "tokens": info.get("tokens", 0),
