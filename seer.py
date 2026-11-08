@@ -42,8 +42,35 @@ def who_line(names, look, ref=False):
         + "。"
     )
     if look or ref:
-        s += "图里出现长得像它的角色（同样的长相、它的 Q 版、它的名字或外号）就是在说它本人。"
+        s += SELF_RULE
     return s
+
+
+# v0.3.2（借作者自己的 QQ 机器人 11-06 v1.17.23–24）：以前写的是「长得像它的角色就是在说它」——
+#   只对上发色就认成它（别的蓝发角色被认成机器人自己）；给了它的长相以后，蓝色的小动物也往它身上靠（猫猫虫认成「小鲸鱼」）
+SELF_RULE = (
+    "图里画的是它本人（它的 Q 版、群友给它画的图）、或者图里写着它的名字 / 外号，就是在说它。"
+    "认长相要对上它至少两样明显的特征（发色发型、头饰、耳朵、尾巴、标志性的配饰这些）才算是它；只对上一样（只是发色像、只是衣服像）不算。"
+    "它的长相只拿来认它本人：别的角色、动物照常按你认得的写（是哪个角色 / 哪种动物就写哪个），别因为颜色、形状有点像就往它身上靠。"
+)
+# v0.3.2（借作者自己的 QQ 机器人 11-06 v1.17.21–22）：动图拼图角上的帧号「1、2、3、4」、角落的「AI生成」水印，看图模型会照抄成图里的字
+TEXT_NOT = "（动图拼成的那张：角上的小数字是帧的顺序，不是图里的字；角落里「AI生成」这种水印也不算字）"
+_FRAME_NUMS = re.compile(r"^\s*\d{1,2}(\s*[、,，.。\s]\s*\d{1,2}){2,}\s*$")
+_WATERMARK = re.compile(r"[（(]?\s*AI\s*生成\s*[)）]?", re.I)
+
+
+def clean_text(t):
+    """图里的字：动图拼图的帧号（1、2、3、4、5、6）、单独一段的「AI生成」水印不算（v0.3.2）"""
+    t = str(t or "").strip()
+    q = "「」“”\"'"
+    if _FRAME_NUMS.match(t.strip(q)):
+        return ""
+    segs = [
+        x
+        for x in re.split(r"\s*[；;/|｜]\s*", t)
+        if x.strip(q + " ") and not _WATERMARK.fullmatch(x.strip(q + " "))
+    ]
+    return "；".join(segs).strip()
 
 
 def build_prompt(
@@ -98,11 +125,11 @@ def build_prompt(
         return p + deep_rules(usage, note)
     p += (
         "用中文写一段话 让看不到图的机器人也能接话（不分行 不说「这是一张图片」）按这个顺序：\n"
-        "字：图里的文字原样抄（没有就不写这项）\n"
+        "字：图里的文字原样抄（没有就不写这项）" + TEXT_NOT + "\n"
         "画面：有什么、谁在干什么（只写要紧的：动作 表情 姿势 场景）\n"
         "梗：这是什么梗 / 出处 / 在玩什么（影视截图、历史事件、网络模板比如「找一车X来弄你」「给X什么都做」都点名说清；"
         "认不出就写「看不出出处」 别编）\n"
-        "跟你：图里真有机器人本人 / 像它的角色，或者图里的字明着说 AI、token、机器人、它的名字 才写（别从聊天里硬往它身上扯；没关系就整项不写）\n"
+        "跟你：图里画的就是它本人（长相对上至少两样明显的特征），或者图里的字明着说 AI、token、机器人、它的名字 才写（别从聊天里硬往它身上扯；没关系就整项不写）\n"
         "坑：有擦边、挖坑、钓鱼、等它上当的地方才写（没有就整项不写 别写「坑：没有」）\n"
         f"格式：字：「…」。画面：…。梗：…。跟你：…。坑：…。总共不超过 {int(max_chars)} 字。"
     )
@@ -180,8 +207,14 @@ FAKE_MARK = re.compile(
 )
 
 
+# 跟「表情包懂你」这类插件一起装（复查后加）：它让模型在回复里写「[表情包:编号]」（数字编号），由它自己换成图；
+# 它给模型的说明里也会写「[表情包:编号]」这个占位。这两种都不是伪造的看图结果（没有描述），不改（半角、全角冒号都放过）
+_STICKER_CODE = re.compile(r"\s*(?:\d{1,6}|编号|序号|数字|id|ID|[NnXx])\s*[\]］】]")
+
+
 def neutral_marks(text):
-    """用户手打的「[看图看懂]」「[图片：…」「[表情包：…」→ 加上「他打的字：」；没有就原样返回"""
+    """用户手打的「[看图看懂]」「[图片：…」「[表情包：…」→ 加上「他打的字：」；没有就原样返回
+    「[表情包:3]」「[表情包：12]」「[表情包:编号]」这种表情包插件的编号不改"""
     s = text or ""
     if not s or not FAKE_MARK.search(s):
         return text
@@ -189,9 +222,13 @@ def neutral_marks(text):
     def fix(m):
         if m.group(1):
             return "[他打的字：看图看懂]"
-        return "[他打的字：" + re.sub(_ZW, "", m.group(2)) + "："
+        name = re.sub(_ZW, "", m.group(2))
+        if name == "表情包" and _STICKER_CODE.match(m.string, m.end()):
+            return m.group(0)
+        return "[他打的字：" + name + "："
 
-    return FAKE_MARK.sub(fix, s)
+    out = FAKE_MARK.sub(fix, s)
+    return text if out == s else out
 
 
 def slot_label(n=1, poss=()):
@@ -494,13 +531,13 @@ def deep_rules(usage=(), note=""):
         )
     p += (
         "按下面的格式，一行一项（没有的写「无」）：\n"
-        "名字：大家会怎么叫它（短；没有通用叫法就按画面起个短名）\n"
-        "字：图里所有的字，逐字照抄（看不清的用▢）\n"
+        "名字：大家会怎么叫它（短；没有通用叫法就按画面起个短名；画的是机器人本人就按画面起，别用别的作品里长得像的角色的名字）\n"
+        "字：图里所有的字，逐字照抄（看不清的用▢）" + TEXT_NOT + "\n"
         "画面：谁 / 什么东西、在做什么、什么表情和动作（只写要紧的）\n"
         "梗：是哪个梗 / 哪部作品 / 哪个名场面 / 哪个固定的表情包系列、出处；不认得写「不确定」（别编）\n"
         "意思：它在群聊里表达什么情绪 / 态度（有真人用它的上下文就照那个来）\n"
         "一般用来：一般什么时候发它（一句）\n"
-        "跟你：图里真有机器人本人 / 像它的角色，或者图里的字明着说 AI、机器人、它的名字 才写（别从聊天里硬往它身上扯）\n"
+        "跟你：图里画的就是机器人本人（长相对上至少两样明显的特征），或者图里的字明着说 AI、机器人、它的名字 才写（别从聊天里硬往它身上扯）\n"
         "坑：有擦边、挖坑、钓鱼的地方才写\n"
         "把握：0~100，你对名字、梗、意思有几成把握"
     )
@@ -545,7 +582,9 @@ def parse_deep(raw):
             e[k] = max(0, min(100, int(d.group(0)))) if d else 0
             continue
         if k == "text":
-            v = v.strip('「」"“”')
+            v = clean_text(v.strip('「」"“”'))  # 帧号 / 水印不算字（v0.3.2）
+        if k == "name":
+            v = _WATERMARK.sub("", v).strip() or v  # 名字里的「AI生成」去掉（v0.3.2）
         if _DEEP_NONE.match(v) or _NONE.match(v) and k in ("you", "trap"):
             v = ""
         if v and not e[k]:
@@ -761,6 +800,21 @@ class StickerDict:
             if a and a != k:
                 self.alias[a] = k
         self.dirty = True
+
+    def set_meme(self, key, meme):
+        """查梗查到了（v0.4.0）：认好的那条「梗」还空着 → 写进去（词条里的「梗：看不出出处」换掉），下次直接用、不用再查
+        → 写了没有。看图模型自己认出来的梗不覆盖；没认好的（没有词条）不写"""
+        e = self.get(key) if key else None
+        dp = (e or {}).get("deep")
+        meme = re.sub(r"[。\n\[\]]", "，", str(meme or "")).strip()[:60]
+        if not dp or not meme or dp.get("meme"):
+            return False
+        dp["meme"] = meme
+        cap = str(dp.get("cap") or "")
+        if "梗：看不出出处" in cap:
+            dp["cap"] = cap.replace("梗：看不出出处", "梗：" + meme, 1)
+        self.dirty = True
+        return True
 
     def link(self, key, same):
         """key 跟 same 是同一张（内容一样）→ 以后按 same 那条用"""

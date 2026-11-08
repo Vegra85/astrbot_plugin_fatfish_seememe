@@ -435,8 +435,30 @@ _TEXT_AT = re.compile("(?<![" + _HAN_RANGE + "])字\\s*[:：]\\s*")
 _QUOTES = {"「": "」", "“": "”", '"': '"', "『": "』", "《": "》"}
 
 
+# v0.3.2：动图拼图角上的帧号「1、2、3、4」、单独一段的「AI生成」水印不算图里的字，不拿去查谐音（跟 seer.clean_text 同一个规矩）
+_FRAME_NUMS = re.compile(r"^\s*\d{1,2}(\s*[、,，.。\s]\s*\d{1,2}){2,}\s*$")
+_WATERMARK = re.compile(r"[（(]?\s*AI\s*生成\s*[)）]?", re.I)
+
+
+def _clean(t):
+    t = str(t or "").strip()
+    q = "「」“”\"'"
+    if _FRAME_NUMS.match(t.strip(q)):
+        return ""
+    segs = [
+        x
+        for x in re.split(r"\s*[；;/|｜]\s*", t)
+        if x.strip(q + " ") and not _WATERMARK.fullmatch(x.strip(q + " "))
+    ]
+    return "；".join(segs).strip()
+
+
 def image_text(cap):
-    """看图结果 → 图里的字（没有 → ""）"""
+    """看图结果 → 图里的字（没有 → ""；帧号、水印洗掉，v0.3.2）"""
+    return _clean(_image_text(cap))
+
+
+def _image_text(cap):
     s = str(cap or "")
     m = _TEXT_AT.search(s)
     if not m:

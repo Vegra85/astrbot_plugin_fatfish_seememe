@@ -53,7 +53,7 @@
 </head>
 <body>
 <h1>看图看懂梗</h1>
-<p class="sub">机器人回话前，先把图看懂：图里的字、画面、在玩什么梗（谐音也按拼音查一遍）、是不是在拿它开涮、有没有坑，写给它看。</p>
+<p class="sub">机器人回话前，先把图看懂：图里的字、画面、在玩什么梗（谐音也按拼音查一遍）、是不是在拿它开涮、有没有坑，写给它看；认不出的梗、有人问「X 是什么梗」时查一下。</p>
 <div class="warn" id="warn">现在没有能看图的模型：插件配置里选「看图用哪个模型」，或者在 AstrBot 的模型设置里给对话模型的「模型能力」勾上「图像」。</div>
 <div id="err"></div>
 <div class="cards">
@@ -94,6 +94,21 @@
 <h2>表情包词典 <span class="muted" style="font-size:12px;font-weight:400" id="sd-off"></span></h2>
 <p class="muted" style="margin:0 0 8px;font-size:13px">同一张图在群里出现第 3 次、或者有人直接拿表情包找机器人，就认真认一次记下来；以后见到直接用，不再花钱看。下面是最近认好的。</p>
 <div class="list" id="stickers"></div>
+
+<h2>查梗 <span class="muted" style="font-size:12px;font-weight:400" id="m-off"></span></h2>
+<p class="muted" style="margin:0 0 8px;font-size:13px">看图结果写「看不出出处」、图里的字像个梗、有人问「X 是什么梗」时查一下：先查缓存（查不到的也记一阵），再查 cnmeme.wiki（第三方梗百科），开了才用 AstrBot 的网页搜索。查到的只给这一轮看（写明来源），也写进表情包词典那条。</p>
+<div class="warn" id="m-warn"></div>
+<div class="cards">
+  <div class="card"><b id="m-cache">-</b><span>今天命中缓存</span></div>
+  <div class="card"><b id="m-online">-</b><span>今天在线查到（cnmeme.wiki）</span></div>
+  <div class="card"><b id="m-search">-</b><span>今天网上搜到</span></div>
+  <div class="card"><b id="m-miss">-</b><span>没查到（超时 <i id="m-late">-</i>、出错 <i id="m-err">-</i>）</span></div>
+  <div class="card"><b id="m-calls">-</b><span>今天调了 cnmeme.wiki（上限 <i id="m-lim">-</i>）</span></div>
+  <div class="card"><b id="m-scalls">-</b><span>今天调了网页搜索（上限 <i id="m-slim">-</i>）</span></div>
+</div>
+<p class="info">cnmeme.wiki：<b id="m-online-st">-</b> · 网页搜索：<b id="m-search-st">-</b> · 聊天里提到查过的梗：<b id="m-chat">-</b> · 缓存：<b id="m-count">-</b></p>
+<h3 style="font-size:13px;margin:12px 0 6px;color:var(--muted);font-weight:500">最近查过的梗</h3>
+<div class="list" id="m-recent"></div>
 
 <h2>出错记录</h2>
 <ul class="log" id="log"></ul>
@@ -146,6 +161,41 @@
       '<div class="empty">还没看过图。群里有人 @ 机器人、带着图（或者先发图再 @）就会看。</div>';
     $("log").innerHTML = (d.errors || []).map((e) => '<li><span class="muted">' + ago(e.t) + "</span> " + esc(e.text) + "</li>").join("") ||
       '<li class="muted">没有。</li>';
+    renderMemes(d.memes || {});
+  }
+
+  function renderMemes(m) {
+    const mt = m.today || {}, lim = m.limits || {}, st = m.state || {};
+    const on = (x) => x || {};
+    $("m-off").textContent = m.on === false ? "（已关掉）" : "";
+    $("m-cache").textContent = mt.meme_cache || 0;
+    $("m-online").textContent = mt.meme_online || 0;
+    $("m-search").textContent = mt.meme_search || 0;
+    $("m-miss").textContent = mt.meme_miss || 0;
+    $("m-late").textContent = mt.meme_late || 0;
+    $("m-err").textContent = mt.meme_err || 0;
+    $("m-calls").textContent = mt.online_calls || 0;
+    $("m-lim").textContent = lim.online == null ? "-" : lim.online;
+    $("m-scalls").textContent = mt.search_calls || 0;
+    $("m-slim").textContent = lim.search == null ? "-" : lim.search;
+    const os = on(st.online), ss = on(st.search);
+    const rest = (x) => x.paused ? "，歇着，还有 " + Math.ceil(x.paused / 60) + " 分钟" : "";
+    $("m-online-st").textContent = m.online ? "开（" + (os.now || "还没试过") + rest(os) + "）" : "关";
+    $("m-search-st").textContent = !m.search ? "关" :
+      (m.search_ready ? "开（AstrBot 的网页搜索：" + (m.search_why || "") + "；" + (ss.now || "还没试过") + rest(ss) + "）" : "开，但用不了");
+    const w = $("m-warn");
+    if (m.on !== false && m.search && !m.search_ready) {
+      w.textContent = "开了「cnmeme.wiki 没查到时用 AstrBot 的网页搜索」，但是" + (m.search_why || "AstrBot 的网页搜索用不了") + "：这一路先跳过。";
+      w.style.display = "block";
+    } else w.style.display = "none";
+    $("m-chat").textContent = m.chat ? "开" : "关";
+    $("m-count").textContent = (m.items || 0) + " 个查到的、" + (m.miss || 0) + " 个查不到的";
+    $("m-recent").innerHTML = (m.recent || []).map((r) => '<div class="item"><div class="meta"><span>' + ago(r.t) + "</span><span>" +
+      esc(r.where || "") + '</span><span class="who">「' + esc(r.term || "") + "」</span>" +
+      (r.why ? '<span class="tag">' + esc(r.why) + "</span>" : "") + '<span class="tag">' + esc(r.how || "") + (r.late ? " · 这一轮没赶上" : "") + "</span>" +
+      '</div><div class="text">' + (r.title ? esc(r.title) + ' <span class="muted">（' + esc(r.src || "") + "）</span>" :
+      '<span class="muted">' + esc(r.note || (r.how === "没查到" ? "没查到" : "没有结果")) + "</span>") + "</div></div>").join("") ||
+      '<div class="empty">还没查过。</div>';
   }
 
   async function load() {

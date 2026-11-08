@@ -2,7 +2,8 @@
   "enable": {
     "description": "开启看图看懂梗",
     "type": "bool",
-    "default": true
+    "default": true,
+    "hint": "关掉 = 这个插件什么都不做（看图、谐音、查梗都不做），机器人照常回话。"
   },
   "vision_provider_id": {
     "description": "看图用哪个模型",
@@ -41,6 +42,54 @@
     "default": [],
     "hint": "一行一个：「谐音写法=原来的词」，比如「蒜你狠=算你狠」（左边是图里会写的，右边是它本来的词）；只写右边的原词也行，三个字以上的会按读音找。内置的词表见 README。"
   },
+  "meme_lookup": {
+    "description": "查梗：认不出的梗、有人问「X 是什么梗」时查一下",
+    "type": "bool",
+    "default": true,
+    "hint": "v0.4.0。看图结果写「梗：看不出出处」（或者图里的字像个梗）、这一轮有人问「X 是什么梗」时：先查插件自己的缓存，再查 cnmeme.wiki（第三方梗百科，免费），下面开了才用 AstrBot 的网页搜索。查到的只给这一轮看（写明来源和更新日期），也写进表情包词典那条。最多等「查梗最多等几秒」，等不到这一轮就不带。关掉 = 跟以前一样不查。"
+  },
+  "meme_online": {
+    "description": "查梗时问 cnmeme.wiki（第三方梗百科）",
+    "type": "bool",
+    "default": true,
+    "hint": "免费、不用 key。会把要查的那个词（图里的字 / 问的 X）发给 cnmeme.wiki。站点挂了、太慢就跳过（连着出错 3 次歇 30 分钟）。查到的存在插件数据目录的 memes.json（插件本身不带词库）。"
+  },
+  "meme_search": {
+    "description": "cnmeme.wiki 没查到时用 AstrBot 的网页搜索",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关：要花钱（按你在 AstrBot 里配的搜索服务商计费）。用的是 AstrBot 自己配的网页搜索（配置 → AI → 网页搜索：开「启用网页搜索」、选服务商、填 key；注意开了以后对话模型自己也能搜）。没配就跳过，面板上有提示。搜到的标「网上搜到的，可能不准」。"
+  },
+  "meme_chat": {
+    "description": "聊天里出现了查过的梗也提一句",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关。开了以后：机器人回话那一轮，他说的话里有缓存里已经查到过的梗（三个字以上），也把那条给模型看。只用缓存、不上网；可能会把正常说话当成玩梗。"
+  },
+  "meme_wait_sec": {
+    "description": "查梗最多等几秒",
+    "type": "float",
+    "default": 5.0,
+    "hint": "回话前最多等这么久（最多 6 秒）；等不到这一轮先不带，接着查完存着，下一轮直接用。有人问「X 是什么梗」的那个跟看图同时查，不多等。"
+  },
+  "meme_online_daily": {
+    "description": "每天最多查 cnmeme.wiki 几次",
+    "type": "int",
+    "default": 200,
+    "hint": "缓存里有的、刚查过没有的不算次数。按「按哪个时区算「今天」」过零点。"
+  },
+  "meme_search_daily": {
+    "description": "每天最多网页搜索几次",
+    "type": "int",
+    "default": 20,
+    "hint": "上面「用 AstrBot 的网页搜索」开着才用。每次搜索按搜索服务商计费。"
+  },
+  "meme_api": {
+    "description": "梗百科的地址",
+    "type": "string",
+    "default": "https://cnmeme.wiki",
+    "hint": "一般不用改。站点换了地址时改这里；留空 = 不查在线（只用缓存和网页搜索）。"
+  },
   "bot_names": {
     "description": "机器人的名字和外号",
     "type": "list",
@@ -73,7 +122,8 @@
   "max_images": {
     "description": "一轮最多看几张图",
     "type": "int",
-    "default": 3
+    "default": 3,
+    "hint": "这一轮最多看几张（这条消息的、引用的、他刚发的加起来）；超出的不看。"
   },
   "recent_sec": {
     "description": "图和 @ 分开发：他多少秒内发的图算数",
@@ -84,7 +134,8 @@
   "refer_sec": {
     "description": "说「上面那张图」时往回找多少秒",
     "type": "int",
-    "default": 600
+    "default": 600,
+    "hint": "他说「上面那张图」「楼上发的」时，往回找群里最近一张图的时间范围。"
   },
   "prefetch": {
     "description": "群里的图都先看好",
@@ -95,7 +146,8 @@
   "max_chars": {
     "description": "看图结果最多多少字",
     "type": "int",
-    "default": 180
+    "default": 180,
+    "hint": "看图模型写的那段最多多少字（表情包词典的词条会长一点）。"
   },
   "wait_sec": {
     "description": "回话前最多等看图多少秒",
@@ -106,7 +158,8 @@
   "timeout_sec": {
     "description": "看一张图最多多少秒",
     "type": "int",
-    "default": 40
+    "default": 40,
+    "hint": "看图模型超过这么久没回，算这次没看成（不影响回话）。"
   },
   "hourly_max": {
     "description": "每小时最多看几张",
@@ -117,7 +170,8 @@
   "daily_max": {
     "description": "每天最多看几张",
     "type": "int",
-    "default": 300
+    "default": 300,
+    "hint": "同一张图看过一次就记住了，不算次数。按「按哪个时区算「今天」」过零点。"
   },
   "day_tz": {
     "description": "按哪个时区算「今天」",
@@ -128,7 +182,8 @@
   "cache_keep": {
     "description": "记住多少张看过的图",
     "type": "int",
-    "default": 600
+    "default": 600,
+    "hint": "满了先扔最久没用到的。存在插件数据目录的 state.json。"
   },
   "forward_images": {
     "description": "转发的聊天记录里的图也看",

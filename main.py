@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-大肥鱼 · 看图看懂梗（AstrBot 插件）
+鱼力max · 看图懂梗（AstrBot 插件）
 
 机器人要回话的那一轮，把相关的图（这条消息里的、引用的消息里的、同一个人刚才发的、他说「上面那张图」时群里最近的一张）
 交给能看图的模型，用「字 / 画面 / 梗 / 跟你 / 坑」五样写清楚：图里有没有机器人自己、在玩什么梗、有没有坑；
@@ -11,6 +11,9 @@ v0.2.1：防伪造 —— 群友在消息里手打「[看图看懂]」「[图片
 v0.3.0：谐音梗 —— 图里的字按拼音查可能的谐音（puns.py，本地查、不调模型），写在看图结果后面；
         一条消息里几张图按位置标「第几张」、没看成的也占着位置；「今天」按配置的时区算（默认北京时间）；
         确认下载到的是图片以后才看、才扣名额；「这一轮的图」只写事实（作者的规矩 E1）。
+v0.4.0：查梗（memes.py）—— 看图模型写「梗：看不出出处」、图里的字像个梗、这一轮有人问「X 是什么梗」时：
+        缓存 → cnmeme.wiki 公开接口 → AstrBot 配的网页搜索（默认关）；查到的当「这一轮」的状态给模型（只写事实、带来源），
+        也写进表情包词典那条的「梗」里；每一步有超时、每天有上限，查不到的记一阵别反复查。
 """
 
 import asyncio
@@ -30,7 +33,7 @@ from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, StarTools
 import astrbot.api.message_components as Comp
 
-from . import puns
+from . import memes, puns
 from .seer import (
     LATE,
     MISS,
@@ -66,8 +69,22 @@ except Exception:
     prepare_model_image = None
 
 PLUGIN_NAME = "astrbot_plugin_fatfish_seememe"
-VERSION = "0.3.1"
+VERSION = "0.4.0"
 TAG = "[看图]"
+MTAG = "[查梗]"  # v0.4.0
+MEME_STEP = 12.0  # 查梗每一路（cnmeme.wiki / 网页搜索）最多等几秒：这一轮等不到的接着查完、存着，超过这个才算出错
+MEME_HTTP = 5.0  # cnmeme.wiki 每个请求最多几秒（一次查梗最多三个请求：两种写法各搜一次、拿正文一次）
+MEME_STATS = (
+    "meme_cache",
+    "meme_online",
+    "meme_search",
+    "meme_miss",
+    "meme_late",
+    "meme_err",
+    "meme_skip",
+    "online_calls",
+    "search_calls",
+)
 LATE_PRIORITY = -sys.maxsize + 100  # 回话请求的最后一步：防伪造（v0.2.1）
 _MAX_BYTES = 20 * 1024 * 1024  # 自己下图时最多下多大（v0.3.0）
 _MAGIC = (
@@ -128,6 +145,25 @@ def _part(text, temp):
     return {"type": "text", "text": text, **({"_no_save": True} if temp else {})}
 
 
+def _tool_ctx(context, event, umo):
+    """调 AstrBot 内置的网页搜索工具要的上下文（v0.4.0）。工具只读 .context.context（插件的 Context，拿配置）
+    和 .context.event（哪个会话）；以后 AstrBot 改了这两个类的写法就退回一个只有这两样的小对象"""
+    try:
+        from astrbot.core.agent.run_context import ContextWrapper
+        from astrbot.core.astr_agent_context import AstrAgentContext
+
+        return ContextWrapper(context=AstrAgentContext(context=context, event=event))
+    except Exception:
+        from types import SimpleNamespace
+
+        ev = event if event is not None else SimpleNamespace(unified_msg_origin=umo)
+        return SimpleNamespace(
+            context=SimpleNamespace(context=context, event=ev, extra={}),
+            messages=[],
+            tool_call_timeout=int(MEME_STEP),
+        )
+
+
 class FatfishSeeMeme(Star):
     """看图看懂梗：回话前帮机器人看懂图里的梗、认出图在说它、看出有没有坑"""
 
@@ -173,6 +209,20 @@ class FatfishSeeMeme(Star):
         self.stickers.load(self._load(self.sticker_file))
         self.stickers.dirty = False
         self._sd_saved = time.time()
+        # 查梗（v0.4.0）：查过的梗（查到的、查不到的）单独一个文件（重启不丢；想清空就删掉 memes.json）
+        self.meme_file = self.data_dir / "memes.json"
+        md = self._load(self.meme_file)
+        self.memes = memes.MemeCache(500)
+        self.memes.load(md)
+        self.memes.dirty = False
+        self.meme_recent = deque(
+            [x for x in md.get("recent") or [] if isinstance(x, dict)], maxlen=30
+        )
+        self.finder = memes.Finder(self.memes)
+        self.meme_inflight = {}  # 键 → (正在查的任务, 它的来历)：同一个词别同时查两遍
+        self.meme_given = defaultdict(dict)  # 会话 → {键: 给过模型的时间}：前面几句里问过的，给过就不再给
+        self._meme_sem = None
+        self._meme_dirty = False
         self.chat = defaultdict(
             lambda: deque(maxlen=16)
         )  # 会话 -> [(时间, 名字, 文字)]
@@ -227,8 +277,22 @@ class FatfishSeeMeme(Star):
             self._dirty = False
             if self.stickers.dirty and (sd or time.time() - self._sd_saved >= 30):
                 self._save_stickers()
+            if self.memes.dirty or self._meme_dirty:
+                self._save_memes()
         except Exception as e:
             logger.warning(f"{TAG} 存档失败：{e!r}")
+
+    def _save_memes(self):
+        """查梗的缓存（查到的、查不到的）和最近查过的（v0.4.0）"""
+        self.memes.dirty = self._meme_dirty = False
+        try:
+            self._write(
+                self.meme_file,
+                {**self.memes.dump(), "recent": list(self.meme_recent)},
+            )
+        except OSError as e:
+            self.memes.dirty = True
+            logger.warning(f"{MTAG} 查梗的缓存存档失败：{e!r}")
 
     def _save_stickers(self):
         self.stickers.dirty = False
@@ -252,6 +316,8 @@ class FatfishSeeMeme(Star):
                 self._save(force=True)
             elif self.stickers.dirty and time.time() - self._sd_saved >= 30:
                 self._save_stickers()
+            elif self.memes.dirty or self._meme_dirty:
+                self._save_memes()
 
     def _ensure_saver(self):
         if self._saver is None or self._saver.done():
@@ -270,6 +336,8 @@ class FatfishSeeMeme(Star):
         if self._saver:
             self._saver.cancel()
         self._save(force=True, sd=True)
+        if self.memes.dirty or self._meme_dirty:
+            self._save_memes()
 
     def _today(self):
         day = day_of(None, self.tz)  # v0.3.0：按配置的时区（以前按服务器的时间）
@@ -282,7 +350,7 @@ class FatfishSeeMeme(Star):
                 "cached": 0,
                 "turns": 0,
             }
-        for k in ("turns", "dict", "deep", "fwd"):  # 老存档里没有的
+        for k in ("turns", "dict", "deep", "fwd") + MEME_STATS:  # 老存档里没有的
             self.stats.setdefault(k, 0)
         return self.stats
 
@@ -783,7 +851,7 @@ class FatfishSeeMeme(Star):
             for attr in ("prompt", "system_prompt"):
                 v = getattr(req, attr, None)
                 if isinstance(v, str) and v:
-                    new = neutral_marks(v)
+                    new = memes.neutral(neutral_marks(v))  # v0.4.0：手打的「# 查到的梗」标题也算
                     if new != v:
                         setattr(req, attr, new)
                         n += 1
@@ -792,7 +860,7 @@ class FatfishSeeMeme(Star):
                     continue
                 t = getattr(part, "text", None)
                 if isinstance(t, str) and t:
-                    new = neutral_marks(t)
+                    new = memes.neutral(neutral_marks(t))
                     if new != t:
                         part.text = new
                         n += 1
@@ -806,29 +874,53 @@ class FatfishSeeMeme(Star):
     @filter.on_llm_request(priority=LATE_PRIORITY)
     async def on_llm_req_late(self, event: AstrMessageEvent, req: ProviderRequest):
         """回话请求的最后一步：防伪造（v0.2.1；AstrBot 的群聊上下文在默认优先级 0 才加进来，所以放到最后）"""
-        if not self._c("enable", True):
-            return
-        self._neutralize(req, set(event.get_extra("fatfish_seememe_parts") or []))
+        try:
+            if not self._c("enable", True):
+                return
+            self._neutralize(req, set(event.get_extra("fatfish_seememe_parts") or []))
+        except Exception as e:  # 钩子出错只记日志（v0.4.0 补上）
+            self._warn_once("late", f"防伪造那一步出错（这一轮照常回）：{e!r}"[:200], 60)
 
     @filter.on_llm_request(priority=50)
     async def on_llm_req(self, event: AstrMessageEvent, req: ProviderRequest):
         before = {id(p) for p in (getattr(req, "extra_user_content_parts", None) or [])}
         try:
             await self._on_llm_req(event, req)
+        except Exception as e:  # v0.4.0 补上：以前这里出错会冒到 AstrBot 主流程里
+            self._warn_once("req", f"回话前那一步出错（这一轮照常回）：{e!r}"[:200], 60)
         finally:
-            mine = [
-                id(p)
-                for p in (getattr(req, "extra_user_content_parts", None) or [])
-                if id(p) not in before
-            ]
-            if (
-                mine
-            ):  # 本插件自己加的段落（看到了什么 / 这一轮的图）：最后防伪造那一步不动
-                event.set_extra("fatfish_seememe_parts", mine)
+            try:
+                mine = [
+                    id(p)
+                    for p in (getattr(req, "extra_user_content_parts", None) or [])
+                    if id(p) not in before
+                ]
+                if mine:  # 本插件自己加的段落（看到了什么 / 这一轮的图 / 查到的梗）：最后防伪造那一步不动
+                    event.set_extra("fatfish_seememe_parts", mine)
+            except Exception:
+                pass
 
     async def _on_llm_req(self, event: AstrMessageEvent, req: ProviderRequest):
         if not self._c("enable", True):
             return
+        # v0.4.0：这一轮有人问「X 是什么梗」→ 先开始查（跟看图一起跑，不多等）；看完图再看看图结果里有没有认不出的梗
+        asks = []
+        try:
+            asks = self._meme_asks(event)
+        except Exception as e:
+            self._warn_once("memeask", f"查梗：认「X 是什么梗」出错：{e!r}"[:200], 600)
+        caps = []
+        try:
+            caps = await self._see_req(event, req) or []
+        except Exception as e:
+            self._warn_once("see", f"看图那一步出错（这一轮先不带图）：{e!r}"[:200], 60)
+        try:
+            await self._memes_req(event, req, asks, caps)
+        except Exception as e:
+            self._warn_once("memes", f"查梗那一步出错（这一轮先不带）：{e!r}"[:200], 60)
+
+    async def _see_req(self, event: AstrMessageEvent, req: ProviderRequest):
+        """看图（v0.3.2 以前的 _on_llm_req）→ 这一轮带进去的看图结果 [(凭据, 看懂的)]（v0.4.0 查梗要用）"""
         items = self._relevant(event)
         fwds = self._forwards(event, items) if self._c("forward_images", True) else []
         if any(src in ("here", "quoted") for _r, src, _w in fwds):
@@ -1015,6 +1107,339 @@ class FatfishSeeMeme(Star):
             + (f"、转发的聊天记录里 {len(fw_caps)} 张" if loaded else "")
             + ("（主模型自己也看得到图）" if main_sees else "")
         )
+        return list(fcaps.items())
+
+    # ───────── 查梗（v0.4.0）─────────
+    def _meme_on(self):
+        return bool(self._c("enable", True)) and bool(self._c("meme_lookup", True))
+
+    def _meme_api(self):
+        """cnmeme.wiki 的地址（配置能改，留空 = 不查在线）；不是网址的当没填"""
+        v = str(self.config.get("meme_api", memes.DEFAULT_BASE) or "").strip()
+        if v and not v.startswith(("http://", "https://")):
+            self._warn_once("memeapi", f"查梗：「梗百科的地址」不是网址（{v[:40]}）：先不查在线", 3600)
+            return ""
+        return v.rstrip("/")
+
+    def _meme_wait(self):
+        """这一轮最多等查梗几秒（总共不超过 6 秒：会拖慢回话）"""
+        return max(0.5, min(6.0, self._c("meme_wait_sec", 5.0)))
+
+    def _meme_asks(self, event):
+        """② 这一轮有人问「X 是什么梗」：这条消息 + 这个会话 2 分钟内别人说的 → [(词, 是不是这条消息问的)]（最多两个）"""
+        if not self._meme_on():
+            return []
+        umo, now = event.unified_msg_origin, time.time()
+        cur = self._text(event)
+        out, seen = [], set()
+        for term in memes.question_terms(cur):
+            out.append((term, True))
+            seen.add(memes.key_of(term))
+        win = self._c("recent_sec", 120)
+        for t, _n, x in reversed(list(self.chat.get(umo) or [])):
+            if now - t > win or len(out) >= 2:
+                break
+            for term in memes.question_terms(x):
+                if memes.key_of(term) not in seen:
+                    out.append((term, False))
+                    seen.add(memes.key_of(term))
+        return [
+            self._meme_job(event, term, "有人问", here=here) for term, here in out[:2]
+        ]
+
+    def _meme_job(self, event, term, why, here=True, img=None):
+        """查一个词：已经在查（别的会话、刚才那一轮）就跟着等那一个 → {term, key, why, here, img, task}"""
+        key = memes.key_of((memes.forms(term) or [term])[0])
+        got = self.meme_inflight.get(key)
+        if got is None or got[0].done():
+            meta = {"why": why, "where": self._where(event), "late": False}
+            task = self._spawn(self._meme_lookup(event, term, meta))
+            got = (task, meta)
+            self.meme_inflight[key] = got
+
+            def _done(t, k=key):
+                if (self.meme_inflight.get(k) or (None,))[0] is t:
+                    self.meme_inflight.pop(k, None)
+
+            task.add_done_callback(_done)
+        return {
+            "term": term,
+            "key": key,
+            "why": why,
+            "here": here,
+            "img": img,
+            "task": got[0],
+            "meta": got[1],
+        }
+
+    def _meme_can(self, src):
+        """今天这一路还能不能调（cnmeme.wiki / 网页搜索各有上限）；能 → 记一次"""
+        st = self._today()
+        k, lim = (
+            ("online_calls", self._c("meme_online_daily", 200))
+            if src == "online"
+            else ("search_calls", self._c("meme_search_daily", 20))
+        )
+        if st[k] >= lim:
+            self._warn_once(
+                "memecap" + src,
+                f"{MTAG} 今天{memes.NAMES[src]}查了 {st[k]} 次，到上限了（插件配置里能调）：今天先不查这一路",
+                3600,
+            )
+            return False
+        st[k] += 1
+        self._save()
+        return True
+
+    def _meme_refund(self, src):
+        """这一路其实没调成（没配）：今天的次数退回去"""
+        st = self._today()
+        k = "online_calls" if src == "online" else "search_calls"
+        st[k] = max(0, int(st.get(k, 0)) - 1)
+        self._save()
+
+    async def _cnmeme_get(self, path, params, timeout):
+        """cnmeme.wiki 公开接口：GET → JSON；404 → None；429 → Busy（照 Retry-After 歇）；别的不对 → 抛出去"""
+        import aiohttp
+
+        if self._meme_sem is None:  # 接口文档要求限制并发：最多同时两个请求
+            self._meme_sem = asyncio.Semaphore(2)
+        hdr = {
+            "Accept": "application/json",
+            "User-Agent": f"{PLUGIN_NAME}/{VERSION} (+https://github.com/Vegra85/{PLUGIN_NAME})",
+        }
+        async with self._meme_sem:
+            async with aiohttp.ClientSession(trust_env=True, headers=hdr) as s:
+                async with s.get(
+                    self._meme_api() + path,
+                    params=params,
+                    timeout=aiohttp.ClientTimeout(total=float(timeout)),
+                ) as r:
+                    if r.status == 404:
+                        return None
+                    if r.status == 429:
+                        raise memes.Busy(_num(r.headers.get("Retry-After"), 60.0))
+                    if r.status != 200:
+                        raise RuntimeError(f"HTTP {r.status}")
+                    return await r.json(content_type=None)
+
+    async def _meme_online(self, term):
+        return await memes.cnmeme_find(self._cnmeme_get, term, step=MEME_HTTP)
+
+    def _web_status(self, umo=None):
+        """AstrBot 自己配的网页搜索（配置 → AI → 网页搜索）能不能用 → (能不能, 服务商 / 为什么不能)"""
+        try:
+            cfg = self.context.get_config(umo=umo) if umo else self.context.get_config()
+            ps = cfg.get("provider_settings") or {}
+        except Exception:
+            ps = {}
+        return memes.web_status(ps)
+
+    async def _meme_search(self, event, umo, term):
+        """网上搜「X 梗」：直接调 AstrBot 内置的搜索工具（key、服务商都是 AstrBot 里配的）"""
+        ok, prov = self._web_status(umo)
+        if not ok:
+            raise memes.Off(prov)
+        tool = self.context.get_llm_tool_manager().get_builtin_tool(memes.WEB_TOOLS[prov])
+        q = f"{(memes.forms(term) or [term])[0][:40]} 梗"
+        raw = await tool.call(_tool_ctx(self.context, event, umo), query=q)
+        return memes.search_entry(term, memes.parse_results(raw))
+
+    async def _meme_lookup(self, event, term, meta):
+        """查一个词（后台任务：这一轮等不到的接着查完、存着，下一轮直接用）→ Finder 的结果"""
+        umo = event.unified_msg_origin
+        online = (
+            self._meme_online
+            if self._c("meme_online", True) and self._meme_api()
+            else None
+        )
+        search, off = None, ""
+        if self._c("meme_search", False):
+            ok, why = self._web_status(umo)
+            if ok:  # 复查后改：AstrBot 没配好网页搜索就不试这一路（以前先扣了今天的次数才发现没配）
+
+                async def search(t, _e=event, _u=umo):
+                    return await self._meme_search(_e, _u, t)
+
+            else:
+                off = why
+
+        r = await self.finder.find(
+            term,
+            online=online,
+            search=search,
+            can=self._meme_can,
+            refund=self._meme_refund,
+            step=MEME_STEP,
+        )
+        if off and not r.get("why"):
+            r["why"] = off
+        st = self._today()
+        name = {
+            "缓存": "meme_cache",
+            "在线": "meme_online",
+            "搜索": "meme_search",
+            "没查到": "meme_miss",
+            "出错": "meme_err",
+        }.get(r["how"], "meme_skip")
+        st[name] = st.get(name, 0) + 1
+        e = r.get("entry") or {}
+        self.meme_recent.append(
+            {
+                "t": int(time.time()),
+                "term": str(term)[:24],
+                "how": r["how"],
+                "why": meta.get("why", ""),
+                "where": meta.get("where", ""),
+                "late": bool(meta.get("late")),
+                "title": str(e.get("title") or "")[:40],
+                "src": memes.source_of(e) if e else "",
+                "note": str(r.get("why") or "")[:80],
+            }
+        )
+        self._meme_dirty = True
+        self._save()
+        if r.get("net") or r["how"] == "出错":  # 命中缓存、刚查过没有的、歇着 / 到上限跳过的：不记日志（面板上有）
+            logger.info(
+                f"{MTAG} 「{str(term)[:24]}」（{meta.get('why')}）→ {r['how']}"
+                + (f"：{e.get('title')}（{memes.source_of(e)}）" if e else "")
+                + (f"；{r['why']}" if r.get("why") else "")
+                + ("（这一轮没赶上，存着下一轮用）" if meta.get("late") and e else "")
+            )
+        return r
+
+    async def _memes_req(self, event, req, jobs, caps):
+        """查梗（v0.4.0）：① 看图结果里认不出的梗 / 像梗的字 ② 有人问「X 是什么梗」（_meme_asks 已经开始查了）
+        ③（默认关）聊天里顺手出现了缓存里有的梗 → 等最多 meme_wait_sec 秒 → 查到的写成「这一轮」的一段（只写事实、带来源）"""
+        if not self._meme_on():
+            return
+        umo, now = event.unified_msg_origin, time.time()
+        jobs = list(jobs or [])
+        for key, cap in caps[:6]:
+            term = memes.image_term(cap, puns.image_text(cap))
+            if term:
+                jobs.append(self._meme_job(event, term, "图里的字", img=key))
+        uniq, by_key = [], {}
+        for j in jobs:
+            if j["key"] in by_key:  # 同一个词：图里的那几张都记上（查到了都写进词典）
+                if j.get("img"):
+                    by_key[j["key"]].setdefault("imgs", []).append(j["img"])
+                by_key[j["key"]]["here"] = by_key[j["key"]]["here"] or j["here"]
+                continue
+            j["imgs"] = [j["img"]] if j.get("img") else []
+            by_key[j["key"]] = j
+            uniq.append(j)
+        uniq = uniq[:4]
+        hits = []
+        if self._c("meme_chat", False):  # ③ 只用缓存，不上网
+            known = self.memes.known(now)
+            for k in memes.chat_hits(
+                self._text(event), known, skip=[j["term"] for j in uniq]
+            ):
+                if k not in by_key:
+                    hits.append((known[k].get("term") or known[k]["title"], k, known[k]))
+        if not uniq and not hits:
+            return
+        pending = {j["task"] for j in uniq if not j["task"].done()}
+        if pending:
+            await asyncio.wait(pending, timeout=self._meme_wait())
+        given = self.meme_given[umo]
+        for k in [k for k, t in given.items() if now - t > 1800]:
+            given.pop(k, None)
+        lines, misses, late = [], [], []
+        for j in uniq:
+            t = j["task"]
+            if not t.done():  # 超时：这一轮不带（接着查完、存着，下一轮直接用）
+                j["meta"]["late"] = True
+                late.append(j["term"])
+                continue
+            if t.cancelled() or t.exception() is not None:
+                continue
+            r = t.result()
+            e = r.get("entry")
+            if not j["here"] and now - given.get(j["key"], 0) < self._c("refer_sec", 600):
+                continue  # 前面几句里问过、刚给过：不再给
+            if e:
+                lines.append(memes.fact_line(j["term"], e))
+                given[j["key"]] = now
+                for k in j.get("imgs") or []:
+                    self._sticker_meme(k, e)
+            elif r.get("how") == "没查到" and j["why"] == "有人问":
+                ln = memes.miss_line(j["term"], r.get("tried"))
+                if ln:  # 插件自己说的（不是词条原文）：放在原文那段外面
+                    misses.append(ln)
+                    given[j["key"]] = now
+        for term, k, e in hits:
+            if now - given.get(k, 0) < self._c("refer_sec", 600):
+                continue
+            lines.append(memes.fact_line(term, e))
+            given[k] = now
+            self._today()["meme_cache"] += 1
+            self.meme_recent.append(
+                {
+                    "t": int(now),
+                    "term": str(term)[:24],
+                    "how": "缓存",
+                    "why": "聊天里",
+                    "where": self._where(event),
+                    "late": False,
+                    "title": str(e.get("title") or "")[:40],
+                    "src": memes.source_of(e),
+                    "note": "",
+                }
+            )
+            self._meme_dirty = True
+        if late:
+            self._today()["meme_late"] += len(late)
+            self._warn_once(
+                "memelate",
+                f"{MTAG} 查梗超过 {self._meme_wait():g} 秒（{'、'.join(late)[:40]}）：这一轮先不带，查完存着下一轮用",
+                60,
+            )
+        text = memes.block(lines, misses)
+        if text:
+            req.extra_user_content_parts.append(_part(text, temp=True))
+            logger.info(
+                f"{MTAG} 这一轮带上了 {len(lines)} 条查到的梗"
+                + (f"、{len(misses)} 条没查到" if misses else "")
+            )
+        self._save()
+
+    def _sticker_meme(self, key, e):
+        """查到的梗写进表情包词典那条的「梗」（那条认好了、梗还空着才写）：下次直接用，不用再查"""
+        if not self._sd_on():
+            return
+        if self.stickers.set_meme(key, memes.sticker_meme(e)):
+            self._save(force=True, sd=True)
+            logger.info(f"{MTAG} 写进了表情包词典：{memes.sticker_meme(e)}")
+
+    def _meme_snapshot(self):
+        st = self._today()
+        ok, why = self._web_status(None)
+        return {
+            "on": self._meme_on(),
+            "online": bool(self._c("meme_online", True)) and bool(self._meme_api()),
+            "api": self._meme_api(),
+            "search": bool(self._c("meme_search", False)),
+            "search_ready": ok,
+            "search_why": why,
+            "chat": bool(self._c("meme_chat", False)),
+            "wait": self._meme_wait(),
+            "today": {k: int(st.get(k, 0)) for k in MEME_STATS},
+            "limits": {
+                "online": self._c("meme_online_daily", 200),
+                "search": self._c("meme_search_daily", 20),
+            },
+            "state": {
+                src: {
+                    "now": self.finder.state.get(src) or "还没试过",
+                    "paused": int(self.finder.paused(src)),
+                }
+                for src in ("online", "search")
+            },
+            **self.memes.count(),
+            "recent": list(self.meme_recent)[-20:][::-1],
+        }
 
     async def _collect(self, tasks, timeout, what="看图"):
         """等这些图看完（最多 timeout 秒）→ {凭据: 看懂的}；没看完的接着看（看完存着 下次直接用）"""
@@ -1398,6 +1823,7 @@ class FatfishSeeMeme(Star):
                 "sound": puns.ready(),
                 "how": puns.how(),
             },
+            "memes": self._meme_snapshot(),  # v0.4.0
             "tz": self.tz_label,
             "version": VERSION,
             "config": {
@@ -1419,6 +1845,13 @@ class FatfishSeeMeme(Star):
                     "sticker_daily",
                     "puns",
                     "pun_words",
+                    "meme_lookup",
+                    "meme_online",
+                    "meme_search",
+                    "meme_chat",
+                    "meme_wait_sec",
+                    "meme_online_daily",
+                    "meme_search_daily",
                     "day_tz",
                 )
             },

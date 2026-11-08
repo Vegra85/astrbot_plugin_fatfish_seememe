@@ -1,14 +1,15 @@
 name: astrbot_plugin_fatfish_seememe
 display_name: 鱼力max · 看图懂梗
-desc: 机器人回话前先看懂图：字、画面、在玩什么梗、是不是在拿它开涮（拿它的头像对照），图里的字按拼音查谐音梗；群里反复出现的表情包认一次记进词典。（原「大肥鱼 · 看图看懂梗」）细节和配置见 README。
+desc: 机器人回话前先看懂图：字、画面、在玩什么梗、是不是在拿它开涮（拿它的头像对照），图里的字按拼音查谐音梗；认不出的梗、有人问「X 是什么梗」时查一下 cnmeme.wiki；群里反复出现的表情包认一次记进词典。（原「大肥鱼 · 看图看懂梗」）细节和配置见 README。
 short_desc: 梗图看得懂、认得出图里是它自己，谐音梗也查
-version: v0.3.1
+version: v0.4.0
 author: Vegra85
 repo: https://github.com/Vegra85/astrbot_plugin_fatfish_seememe
 astrbot_version: ">=4.29,<5"
 support_platforms:
   - aiocqhttp
 social_link: https://github.com/Vegra85
+category: 娱乐
 tags:
   - 鱼力max
   - 大肥鱼
@@ -18,6 +19,7 @@ tags:
   - 图片描述
   - 梗图
   - 谐音梗
+  - 查梗
   - 表情包
   - 群聊
 license: MIT
