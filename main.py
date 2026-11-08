@@ -66,7 +66,7 @@ except Exception:
     prepare_model_image = None
 
 PLUGIN_NAME = "astrbot_plugin_fatfish_seememe"
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 TAG = "[看图]"
 LATE_PRIORITY = -sys.maxsize + 100  # 回话请求的最后一步：防伪造（v0.2.1）
 _MAX_BYTES = 20 * 1024 * 1024  # 自己下图时最多下多大（v0.3.0）

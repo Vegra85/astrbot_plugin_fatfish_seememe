@@ -1,8 +1,8 @@
 name: astrbot_plugin_fatfish_seememe
-display_name: 大肥鱼 · 看图看懂梗
-desc: 机器人回话前先把图看懂：图里的字、画面、在玩什么梗、是不是在拿机器人开涮（拿它的头像对照）、有没有擦边挖坑；图里的字还按拼音查谐音梗（「夺笋」= 多损），一起写给它。图和 @ 分开发、引用别人的图、说「上面那张图」、转发的聊天记录里的图都对得上；群里反复出现的表情包认真认一次记进词典，以后直接用。对话模型看不了图时，用你选的看图模型。
-short_desc: 让机器人看懂群里的梗图：谐音梗也查，认出图在说它、看穿挖坑
-version: v0.3.0
+display_name: 鱼力max · 看图懂梗
+desc: 机器人回话前先看懂图：字、画面、在玩什么梗、是不是在拿它开涮（拿它的头像对照），图里的字按拼音查谐音梗；群里反复出现的表情包认一次记进词典。（原「大肥鱼 · 看图看懂梗」）细节和配置见 README。
+short_desc: 梗图看得懂、认得出图里是它自己，谐音梗也查
+version: v0.3.1
 author: Vegra85
 repo: https://github.com/Vegra85/astrbot_plugin_fatfish_seememe
 astrbot_version: ">=4.29,<5"
@@ -10,8 +10,14 @@ support_platforms:
   - aiocqhttp
 social_link: https://github.com/Vegra85
 tags:
+  - 鱼力max
+  - 大肥鱼
+  - DeepSeek
   - 图片理解
+  - 识图
+  - 图片描述
   - 梗图
   - 谐音梗
   - 表情包
   - 群聊
+license: MIT
