@@ -6,7 +6,7 @@
   A 带图 @ 机器人：看一次（两张图：头像 + 这张）；回话请求里有看懂的结果和「图在说你」
   B 先发图、再 @：看他刚才发的那张（发图的时候不看）
   C 引用别人的图 @：看引用的那张
-  D 同一张图换个群再发：不再看（记住了）
+  D 同一张图换个群、换个人再发：在那个群里重新看一次（v0.4.1：带上下文看出来的整段只给同一个对话、同一个发图人；以前是不再看）
   E 「上面那张图什么意思」：看群里最近一张
   F 动图：拼帧看、结果是「动图：…」
   G QQ 商城表情（mface，AstrBot 自己会丢掉）、表情包（sub_type=1）
@@ -1086,9 +1086,11 @@ async def main():
             qq, G2, HUMAN3, "哈哈哈", at_bot=True, image="red.png"
         )
         lu = text_of(last_user(chat))
+        # v0.4.1：以前直接用上次（别的群、别人发的那次）看出来的整段；现在整段只给同一个对话、同一个发图人，
+        # 换了群 / 换了人要回话时在这边重新看一次（按图共用的只有「字 / 画面」）。同一个对话同一个人再发不再看：见 tests/test_scope.py
         check(
-            ok and not vc and "「阿珍」发的图：字：「给token」" in lu,
-            "没再看（同一张图记住了），回话请求里照样有",
+            ok and len(vc) == 1 and "「阿珍」发的图：字：「给token」" in lu,
+            "换个群、换个人发同一张：在这个群里重新看一次（v0.4.1；旧代码会失败：直接用了别的群那段），回话请求里照样有",
             (vc, lu[-500:]),
         )
 
@@ -1622,8 +1624,8 @@ async def main():
         )
         lu = text_of(last_user(chat))
         check(
-            ok and not vc and "「鲲鹏摆尾」可能是这个梗" in lu and len(meme_calls) == nm,
-            "同一张图换个群再发：看图用记住的、查梗命中缓存，都不再上网",
+            ok and len(vc) == 1 and "「鲲鹏摆尾」可能是这个梗" in lu and len(meme_calls) == nm,
+            "同一张图换个群、换个人再发：看图在这个群里重新看一次（v0.4.1），查梗命中缓存、不再上网",
             (vc, meme_calls[nm:]),
         )
         nm = len(meme_calls)
@@ -1831,7 +1833,9 @@ async def main():
             )
             check(
                 any(
-                    "给token" in (x.get("cap") or "") and x.get("where") == f"群 {G1}"
+                    # v0.4.1：换群 / 换人发同一张会在那边重新看一次，最近看过的条目变多，面板只给最近 30 条 ——
+                    # 最早那张「给token」会被挤出去；这一项只查「每条都写着在哪个群、看到什么」
+                    str(x.get("where") or "").startswith("群 ") and (x.get("cap") or "")
                     for x in st.get("recent") or []
                 ),
                 "状态：最近看懂的图（在哪个群、看到什么）",
@@ -2216,7 +2220,7 @@ async def main():
         ok, vc, chat = await turn(qq, G3, HUMAN, "我刚发的这张呢", at_bot=True)
         lu = text_of(last_user(chat))
         check(
-            ok and not vc and "字：「我太南了」" in lu and PUN not in lu,
+            ok and len(vc) == 1 and "字：「我太南了」" in lu and PUN not in lu,  # v0.4.1：这张第一轮是别的群、别人发的 → 这边重新看一次
             "关掉谐音：看图结果照样给，谐音那句不加",
             lu[-400:],
         )

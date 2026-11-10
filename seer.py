@@ -310,6 +310,28 @@ TEXT_REFERS = re.compile(
 )
 
 
+# v0.4.1：看图的提示里带着聊天上下文（谁发的、发图时说的、之前几句）—— 「梗 / 跟你 / 坑」（词条还有「意思 / 一般用来」）
+# 可能是结合那段聊天写出来的。以前整段按图记住、所有对话共用：私聊里看过的图，群里有人发同一张，拿到的是私聊那次的整段。
+# 现在按图共用的只留「字 / 画面」（plain_cap）；整段另存一份，只给同一个对话、同一个发图人用（main.py 的 _scope）。
+_OWN_AT = re.compile(r"(字|画面)\s*[:：]")
+_CTX_AT = re.compile(r"(梗|意思|一般用来|跟你|坑)\s*[:：]")
+
+
+def plain_cap(cap):
+    """看图结果里只跟图本身有关、能给别的对话用的那部分：「字：…」「画面：…」（开头的「动图：」留着）。
+    从第一个别的项（梗 / 意思 / 一般用来 / 跟你 / 坑）起全不要 —— 那几项里再出现「字：」「画面：」也不算；
+    认不出「字 / 画面」的写法（模型没按格式写）→ ""：分不出哪部分是图本身的，整段都不给别的对话"""
+    cap = str(cap or "")
+    m = _CTX_AT.search(cap)
+    own = cap[: m.start()] if m else cap
+    m = _OWN_AT.search(own)
+    if not m:
+        return ""
+    head = own[: m.start()].strip()
+    out = (head if head in ("动图：", "动图:") else "") + own[m.start() :]
+    return out.strip().rstrip("。，,；; ")
+
+
 class Cache:
     """看过的图：key → 描述（同一张图 换个群发也不再花钱看）。持久化交给外面（dump / load）
     一张图一般有两个凭据（文件名 / 网址 + 内容的 md5），所以最多存 keep × 2 条"""
@@ -697,10 +719,13 @@ class StickerDict:
     alias：别的凭据（图片内容的 md5）→ 那条的凭据
     tz：每天深度认几张按哪个时区分天（v0.3.0；None = 服务器的时间）"""
 
+    VER = 2  # 存档的版本（v0.4.1）：2 = 私聊的会话、私聊里的话不进词典；没有这个数的老存档读进来时清一次（_drop_private）
+
     def __init__(self, after=3, daily=30, keep=2000, tz=None):
         self.items, self.alias, self.days = {}, {}, {}
         self.pending = {}  # 会话 -> (凭据, 时间, 谁发的)：发完以后别人接的那句记进这次的上下文
         self.dirty = False
+        self.cleaned = 0  # 读老存档时清了几条（v0.4.1，见 _drop_private）
         self.tz = tz
         self.configure(after, daily, keep)
 
@@ -727,8 +752,11 @@ class StickerDict:
         to_bot=False,
         sticker=False,
         now=None,
+        private=False,
     ):
-        """有人发了这张 → 记一次；返回这张现在该不该深度认"""
+        """有人发了这张 → 记一次；返回这张现在该不该深度认
+        private = 是在私聊里发的（v0.4.1）：只记次数 —— 词条是所有对话共用的，「ctx」是深度认时给看图模型的
+        「群里真人发它的那几次」，私聊里的话不能进去；私聊的会话标识里有对方的 QQ 号，也不存"""
         if not key:
             return False
         now = float(now or time.time())
@@ -742,6 +770,10 @@ class StickerDict:
             e["sticker"] = True
             if to_bot:  # 直接拿表情包找机器人：不用等第 3 次
                 e["want"] = True
+        if private:  # v0.4.1：见上
+            self.dirty = True
+            self.prune()
+            return self.due(k, now)
         conv = str(conv or "")
         if conv and conv not in e["convs"]:
             e["convs"] = (e["convs"] + [conv])[-10:]
@@ -890,7 +922,35 @@ class StickerDict:
         self.dirty = True
 
     def dump(self):
-        return {"items": self.items, "alias": self.alias, "days": self.days}
+        return {
+            "items": self.items,
+            "alias": self.alias,
+            "days": self.days,
+            "v": self.VER,
+        }
+
+    def _drop_private(self):
+        """老存档（v0.4.0 以前）清一次（v0.4.1）：那时私聊里发的也记了会话、前后说的话，私聊里认的词条也带着私聊的上下文。
+        老存档没记每一句是哪个会话的，只能按整条判断，宁可多清：
+        - 会话里有不是群聊的（私聊；认不出是不是群聊的也算）：前后那几句全清掉、词条丢掉（次数留着，下次见到重新认）、
+          那个会话标识去掉；
+        - 会话记满 10 个的（更早的已经挤掉了，说不清有没有私聊）：词条丢掉重新认（那几句都是最近 10 个会话里的，留着）；
+        - 只在群里见过的：不动。
+        → 清了几条"""
+        n = 0
+        for e in self.items.values():
+            convs = [str(c) for c in e.get("convs") or []]
+            groups = [c for c in convs if ":GroupMessage:" in c]
+            mixed = len(groups) != len(convs)
+            if mixed:
+                e["convs"] = groups
+                e["ctx"] = []
+            if (mixed or len(convs) >= 10) and e.get("deep"):
+                e.pop("deep", None)
+            elif not mixed:
+                continue
+            n += 1
+        return n
 
     def load(self, d):
         if not isinstance(d, dict):
@@ -906,4 +966,7 @@ class StickerDict:
         days = d.get("days")
         if isinstance(days, dict):
             self.days = {str(x): int(n) for x, n in days.items() if str(n).isdigit()}
+        if not str(d.get("v") or "").isdigit() or int(d["v"]) < self.VER:
+            self.cleaned = self._drop_private()
+            self.dirty = self.dirty or bool(self.items)  # 外面看到 dirty 就存回去（清过的、带上版本号的）
         self.prune()

@@ -651,20 +651,42 @@ META = (d / "metadata.yaml").read_text(encoding="utf-8")
 CL = (d / "CHANGELOG.md").read_text(encoding="utf-8")
 RD = (d / "README.md").read_text(encoding="utf-8")
 check(
-    'VERSION = "0.4.0"' in MAIN and "version: v0.4.0" in META and "## v0.4.0" in CL,
-    "版本 0.4.0：main.py、metadata、CHANGELOG 一致",
+    'VERSION = "0.4.1"' in MAIN and "version: v0.4.1" in META and "## v0.4.1" in CL,
+    "版本 0.4.1：main.py、metadata、CHANGELOG 一致",
 )
 check(
     "cnmeme.wiki" in RD and "不带词库" in RD and "memes.json" in RD,
     "README 写明：依赖第三方站点 cnmeme.wiki、插件不带词库、查到的缓存在哪",
 )
+# v0.4.1：以前这里要求 README 写「只有一个「像梗的词」」「不发图、不发聊天内容」—— 跟实际对不上（人名、引号里的一句聊天原话会被当成
+# 要查的词发出去，见下面「现状」那一项）。改成要求 README 和配置说明照实写：默认开、发的是什么、可能是名字或一句短话、怎么关
 check(
-    "只有一个「像梗的词」" in RD and "不发图、不发聊天内容" in RD,
-    "README 写明会发给 cnmeme.wiki 什么：只发像梗的词，不发图、不发聊天（复查后加）",
+    "查梗**默认开着**" in RD
+    and "有可能是一个人的名字，或者图上、聊天里的一句短话" in RD
+    and "人名、图上或聊天里的一句短话会被当成要查的词发出去" in RD
+    and "不发图，不发整段聊天记录" in RD
+    and "关掉「查梗时问 cnmeme.wiki」" in RD
+    and "不发聊天内容" not in RD
+    and "不发图、不发聊天；" not in RD,
+    "README 照实写会发给 cnmeme.wiki 什么：默认开；问的那个词 / 图里像梗的短字，可能是名字或一句短话；不发图、不发整段聊天记录；怎么关（v0.4.1）",
+)
+check(
+    all(
+        x in SC.get("meme_online", {}).get("hint", "")
+        for x in ("默认开", "名字", "一句短话", "关掉")
+    )
+    and "默认开" in SC.get("meme_lookup", {}).get("hint", ""),
+    "配置里「查梗」「查梗时问 cnmeme.wiki」的说明也照实写了（v0.4.1）",
+)
+QT = getattr(M, "question_terms", lambda t: [])
+check(
+    QT("她跟我说“我们还是做朋友吧”是什么意思") == ["我们还是做朋友吧"] and QT("王建国是什么梗") == ["王建国"],
+    "（现状，README 写的就是这个）引号里的一句话、人名：会被当成要查的词 —— 哪天把规则收紧了，这一项和 README 一起改",
+    (QT("她跟我说“我们还是做朋友吧”是什么意思"), QT("王建国是什么梗")),
 )
 check(not list(d.rglob("*.db")) and not list(d.rglob("memes.json")), "插件里没有打包词库（.db / memes.json）")
 src = "\n".join((d / x).read_text(encoding="utf-8") for x in ("memes.py", "main.py", "README.md", "CHANGELOG.md"))
-qq = re.findall(r"(?<![\d.])\d{8,11}(?![\d.])", src)
+qq = [x for x in re.findall(r"(?<![\d.])\d{8,11}(?![\d.])", src) if x != "743856783"]  # 743856783：README「反馈」里公开的 QQ 群（鱼力max部署交流群，Mario 11-09 定）
 check(not qq, "代码 / 文档里没有像 QQ 号 / 群号的长数字", qq[:5])
 BOT = "".join(map(chr, (0x6C50, 0x7C73)))  # 作者机器人的名字：用码位拼，测试文件自己也不出现这个名字
 check(BOT not in src and "本鱼" not in src, "代码 / 文档里没有作者机器人的名字")

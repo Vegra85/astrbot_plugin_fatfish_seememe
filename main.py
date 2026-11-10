@@ -14,6 +14,9 @@ v0.3.0：谐音梗 —— 图里的字按拼音查可能的谐音（puns.py，�
 v0.4.0：查梗（memes.py）—— 看图模型写「梗：看不出出处」、图里的字像个梗、这一轮有人问「X 是什么梗」时：
         缓存 → cnmeme.wiki 公开接口 → AstrBot 配的网页搜索（默认关）；查到的当「这一轮」的状态给模型（只写事实、带来源），
         也写进表情包词典那条的「梗」里；每一步有超时、每天有上限，查不到的记一阵别反复查。
+v0.4.1：看图结果分对话记 —— 以前整段按图记住、所有对话共用，私聊里带着上下文看出来的那段，群里有人发同一张会原样拿到。
+        现在按图共用的只有「字 / 画面」；整段另存一份，只给同一个对话、同一个发图人用；别的对话要回话时在自己那边重新看。
+        表情包词典：私聊里的话不进词典、不带进深度认的提示，私聊的会话标识不存；老存档读进来清一次。
 """
 
 import asyncio
@@ -53,6 +56,7 @@ from .seer import (
     neutral_marks,
     parse_deep,
     parse_forward,
+    plain_cap,
     refused,
     row_text,
     slot_label,
@@ -69,7 +73,7 @@ except Exception:
     prepare_model_image = None
 
 PLUGIN_NAME = "astrbot_plugin_fatfish_seememe"
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 TAG = "[看图]"
 MTAG = "[查梗]"  # v0.4.0
 MEME_STEP = 12.0  # 查梗每一路（cnmeme.wiki / 网页搜索）最多等几秒：这一轮等不到的接着查完、存着，超过这个才算出错
@@ -193,8 +197,18 @@ class FatfishSeeMeme(Star):
                 "也可以写 UTC+8 这种）：先按北京时间算「今天」"
             )
         st = self._load()
+        # v0.4.1：self.cache = 按图记的，所有对话共用，只有「字 / 画面」（老存档里是整段：读进来只留这两项）；
+        # self.cache_ctx = 带着聊天上下文看出来的整段，按「对话 + 发图人 + 图」记（_scope），只给同一个对话、同一个发图人用
         self.cache = Cache(self._c("cache_keep", 600))
-        self.cache.load(st.get("cache"))
+        kept, cut = self._plain_only(st.get("cache"))
+        self.cache.load(kept)
+        if cut:
+            logger.info(
+                f"{TAG} 老版本记住的看图结果是整段按图存的（可能带着当时那个对话的内容）：{cut} 条只留了「字 / 画面」，"
+                "别的丢掉了，下次要回话时重新看"
+            )
+        self.cache_ctx = Cache(self._c("cache_keep", 600))
+        self.cache_ctx.load(st.get("cache_ctx"))
         self.stats = st.get("stats") or {}
         self.recent_caps = deque(st.get("recent") or [], maxlen=60)
         self.errors = deque(st.get("errors") or [], maxlen=20)
@@ -207,6 +221,13 @@ class FatfishSeeMeme(Star):
             tz=self.tz,
         )
         self.stickers.load(self._load(self.sticker_file))
+        if self.stickers.dirty:  # v0.4.1：老存档读进来清过一次（StickerDict._drop_private）→ 马上存回去
+            if self.stickers.cleaned:
+                logger.info(
+                    f"{TAG} [表情包词典] 老存档里有 {self.stickers.cleaned} 条在私聊里见过 / 说不清在哪见过："
+                    "记下的前后那几句、认好的词条清掉了（次数留着，下次见到重新认）"
+                )
+            self._save_stickers()
         self.stickers.dirty = False
         self._sd_saved = time.time()
         # 查梗（v0.4.0）：查过的梗（查到的、查不到的）单独一个文件（重启不丢；想清空就删掉 memes.json）
@@ -246,6 +267,8 @@ class FatfishSeeMeme(Star):
         self._saved_at = 0.0
         self._tasks = set()
         self._saver = None
+        if cut:  # v0.4.1：老存档清过了 → 马上存回去（别让那些整段留在盘上等到下一次看图）
+            self._save(force=True)
         self._register_web()
 
     # ───────── 配置 / 存档 ─────────
@@ -259,6 +282,20 @@ class FatfishSeeMeme(Star):
         except Exception:
             return {}
 
+    @staticmethod
+    def _plain_only(d):
+        """按图共用的那份存档读进来时过一遍（v0.4.1）→ (只留「字 / 画面」的, 改了 / 丢了几条)
+        v0.4.0 以前这里存的是整段（带着当时那个对话的上下文看出来的，私聊里看的也在里面）：每条只留「字 / 画面」，
+        留不下的整条不要。新版本存的本来就只有这两项，再过一遍不变"""
+        out, cut = {}, 0
+        for k, v in d.items() if isinstance(d, dict) else ():
+            cap = v.get("cap") if isinstance(v, dict) else None
+            plain = plain_cap(cap) if cap else ""
+            if plain:
+                out[k] = dict(v, cap=plain)
+            cut += plain != (cap or "")
+        return out, cut
+
     def _save(self, force=False, sd=False):
         """AstrBot 被直接关掉（关窗口、结束进程）时不会调 terminate()，所以有变化就尽快存：最多 3 秒存一次
         表情包词典（每条带图的消息都要记一笔，文件也大一些）：最多 30 秒存一次；刚认好一张（sd=True）马上存"""
@@ -269,6 +306,7 @@ class FatfishSeeMeme(Star):
         try:
             d = {
                 "cache": self.cache.dump(),
+                "cache_ctx": self.cache_ctx.dump(),  # v0.4.1
                 "stats": self.stats,
                 "recent": list(self.recent_caps),
                 "errors": list(self.errors),
@@ -371,6 +409,15 @@ class FatfishSeeMeme(Star):
         if key_ok(file):
             return "f:" + str(file)[:100]
         return "u:" + hashlib.sha1(str(ref).encode("utf-8", "ignore")).hexdigest()[:20]
+
+    @staticmethod
+    def _scope(umo, im):
+        """这次看图带的聊天上下文是谁的（哪个对话 + 谁发的图）→ 整段另存那份的凭据前缀；没有对话 → ""（v0.4.1）
+        只存哈希：对话的标识里有 QQ 号 / 群号，不原样写进 state.json"""
+        if not umo:
+            return ""
+        raw = f"{umo}|{im.get('uid') or im.get('sender') or ''}"
+        return "c:" + hashlib.sha1(raw.encode("utf-8", "ignore")).hexdigest()[:12] + ":"
 
     @staticmethod
     def _raw_segs(event):
@@ -553,7 +600,7 @@ class FatfishSeeMeme(Star):
                     break
         return out[:most]
 
-    def _ctx(self, umo, im, to_bot, ask="", place=""):
+    def _ctx(self, umo, im, to_bot, ask="", place="", private=False):
         chat = [
             f"{n}: {x}"
             for t, n, x in (self.chat.get(umo) or [])
@@ -566,7 +613,19 @@ class FatfishSeeMeme(Star):
             "said": im.get("said") or "",
             "ask": ask,
             "place": place,
+            "private": bool(private),  # v0.4.1：私聊里该深度认的那张，认的时候不带这些上下文（见 _look）
         }
+
+    @staticmethod
+    def _private(event):
+        """是不是私聊（v0.4.1）。问不出来：没有群号就当私聊（宁可当成私聊：私聊里的话不进表情包词典）"""
+        try:
+            return bool(event.is_private_chat())
+        except Exception:
+            try:
+                return not event.get_group_id()
+            except Exception:
+                return True
 
     @staticmethod
     def _place(event):
@@ -635,7 +694,11 @@ class FatfishSeeMeme(Star):
                     self._caption(
                         im,
                         self._ctx(
-                            umo, im, self._to_bot(event), place=self._place(event)
+                            umo,
+                            im,
+                            self._to_bot(event),
+                            place=self._place(event),
+                            private=self._private(event),
                         ),
                         umo,
                         sid,
@@ -672,6 +735,7 @@ class FatfishSeeMeme(Star):
                 to_bot=to_bot,
                 sticker=bool(im.get("kind")),
                 now=now,
+                private=self._private(event),  # v0.4.1：私聊里发的只记次数
             ):
                 due.add(im["key"])
         return due
@@ -971,12 +1035,13 @@ class FatfishSeeMeme(Star):
         ]
         ask = self._text(event)
         place = self._place(event)
+        private = self._private(event)
         where = self._where(event)
         tasks = {
             im["key"]: self._spawn(
                 self._caption(
                     im,
-                    self._ctx(umo, im, True, ask=ask, place=place),
+                    self._ctx(umo, im, True, ask=ask, place=place, private=private),
                     umo,
                     sid,
                     where=where,
@@ -1032,6 +1097,7 @@ class FatfishSeeMeme(Star):
                     "ask": ask,
                     "place": place,
                     "via": "转发的聊天记录",
+                    "private": private,
                 }
                 fwd_tasks[fi["key"]] = self._spawn(
                     self._caption(im, ctx, umo, sid, where=where)
@@ -1590,7 +1656,11 @@ class FatfishSeeMeme(Star):
         self, im, ctx, umo, sid, background=False, fresh=False, where="", info=None
     ):
         """看一张图 → 看懂的那句；看不成 → None。
-        先查表情包词典（认好的直接用）→ 再查看过的 → 都没有才真的看（该深度认的这次就深度认）"""
+        先查表情包词典（认好的直接用）→ 再查看过的 → 都没有才真的看（该深度认的这次就深度认）
+        看过的分两份（v0.4.1）：这个对话、这个发图人看过的整段（cache_ctx）直接用；
+        只有按图共用的那份（cache，只有「字 / 画面」，是别的对话 / 别人发的时候看的）→ 要回话的这一轮在这个对话里重新看一次
+        （梗 / 跟它有没有关系 / 有没有坑要结合这边的聊天），没人等着回话的（后台先看好）就用那份、不另外花钱；
+        重新看不成（没模型 / 到上限 / 出错）也退回那份"""
         k = im["key"]
         sd = self._sd_on() and not fresh
         if sd:
@@ -1600,30 +1670,42 @@ class FatfishSeeMeme(Star):
                 return hit
         deep = sd and self.stickers.due(k)
         fallback = None
+        sc = self._scope(umo, im)
+        # 正在看的那张按谁记：词条是所有对话共用的，深度认按图记；平常看的整段只给这个对话 + 发图人，按它记（v0.4.1：
+        # 以前都按图记，私聊那次还没看完时群里同一张也来了，群里等到的就是私聊那段）
+        ik = k if deep else sc + k
         if not fresh:
-            hit = self.cache.get(k)
+            hit = self.cache_ctx.get(sc + k) if sc else None
             if hit and not deep:
                 self._today()["cached"] += 1
                 return hit
-            fallback = hit  # 该深度认、但这次认不成（没模型 / 到上限 / 出错）：先用以前看过的那句
-            if k in self.inflight:
-                return await asyncio.shield(self.inflight[k])
+            plain = self.cache.get(k)
+            if plain and not deep and (background or not sc):
+                self._today()["cached"] += 1
+                return plain
+            # 该深度认 / 该重新看、但这次看不成（没模型 / 到上限 / 出错）：先用以前看过的那句
+            fallback = hit or plain
+            wait = self.inflight.get(ik) or self.inflight.get(k)  # 按图记着的 = 这张正在深度认（词条本来就共用）：等它
+            if wait is not None:
+                got = await asyncio.shield(wait)
+                return got if got is not None else fallback
         fut = asyncio.get_running_loop().create_future()
         if not fresh:
-            self.inflight[k] = fut
+            self.inflight[ik] = fut
         cap = None
         try:
             cap = await self._look(
                 im, ctx, umo, sid, background, fresh, where, info, deep
             )
-            if cap is None:
-                cap = fallback
-            return cap
+            if cap is not None:
+                return cap
+            # 内容一样、换了文件名的：_look 里按内容认出来以后，按图那份（字 / 画面）已经记到这个凭据上了
+            return fallback or (None if fresh else self.cache.get(k))
         finally:
-            if self.inflight.get(k) is fut:
-                self.inflight.pop(k, None)
+            if self.inflight.get(ik) is fut:
+                self.inflight.pop(ik, None)
             if not fut.done():
-                fut.set_result(cap)
+                fut.set_result(cap)  # 等着同一张的只拿这次真看出来的；各自的「以前看过的那句」各自退
 
     async def _look(self, im, ctx, umo, sid, background, fresh, where, info, deep):
         k = im["key"]
@@ -1656,12 +1738,19 @@ class FatfishSeeMeme(Star):
                     self.stickers.link(k, md5)
                     st["dict"] += 1
                     return hit
+            sc = self._scope(umo, im)  # v0.4.1：整段按「对话 + 发图人」另存，见 _caption
             if not fresh and not deep:
-                hit = self.cache.get(md5)
+                hit = self.cache_ctx.get(sc + md5) if sc else None
                 if hit:
-                    self.cache.put([k], hit)
+                    self.cache_ctx.put([sc + k], hit)
                     st["cached"] += 1
                     return hit
+                hit = self.cache.get(md5)  # 按图共用的那份（只有「字 / 画面」）
+                if hit:
+                    self.cache.put([k], hit)
+                    if background or not sc:
+                        st["cached"] += 1
+                        return hit
             while self.hour and now - self.hour[0] > 3600:
                 self.hour.popleft()
             if st["n"] >= self._c("daily_max", 300) or len(self.hour) >= self._c(
@@ -1677,6 +1766,10 @@ class FatfishSeeMeme(Star):
             ref = await self._avatar_ref(sid)
             note = "动图（按顺序抽了几帧拼成一张）" if montage else ""
             gid = str(where[2:]) if str(where).startswith("群 ") else ""
+            if deep and ((ctx or {}).get("private") or (ctx or {}).get("via")):
+                # v0.4.1：词条是所有对话共用的 —— 私聊里、转发的聊天记录里的图该深度认时，不带那边的上下文
+                # （谁发的、说了什么、前面几句）；群里真人发它的那几次（usage）照带
+                ctx = {"to_bot": ctx.get("to_bot"), "place": ctx.get("place")}
             prompt = build_prompt(
                 self._names(sid, gid),
                 str(self.config.get("bot_look") or ""),
@@ -1732,7 +1825,12 @@ class FatfishSeeMeme(Star):
                         f"{TAG} [表情包词典] 把握不够（{entry.get('conf')}），这次照用、不拿来当词条"
                     )
             if not fresh:
-                self.cache.put([k, md5], cap)
+                # v0.4.1：按图共用的只存「字 / 画面」；整段只给这个对话、这个发图人
+                plain = plain_cap(cap)
+                if plain:
+                    self.cache.put([k, md5], plain)
+                if sc:
+                    self.cache_ctx.put([sc + k, sc + md5], cap)
             self.recent_caps.append(
                 {
                     "t": int(time.time()),

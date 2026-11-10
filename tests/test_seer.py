@@ -824,6 +824,117 @@ check(
     e14,
 )
 
+print("\n[15 分对话（v0.4.1）：按图共用的只有「字 / 画面」；私聊的不进表情包词典；老存档]")
+if need("plain_cap"):
+    pc = seer.plain_cap
+    check(
+        pc("字：「在吗」。画面：一只猫探头。梗：看不出出处。跟你：图里是你。坑：某人说「晚点聊」像在试探")
+        == "字：「在吗」。画面：一只猫探头",
+        "整段里只留「字 / 画面」：梗 / 跟你 / 坑 可能是结合聊天写的，不给别的对话",
+    )
+    check(
+        pc("动图：字：「冲」。画面：一开始举手，然后跳起来。梗：某个模板")
+        == "动图：字：「冲」。画面：一开始举手，然后跳起来"
+        and pc("画面：一只猫。跟你：图里画的是你") == "画面：一只猫"
+        and pc("字:「a」。画面:b。坑:c") == "字:「a」。画面:b",
+        "动图的开头留着；没有字的图只留画面；半角冒号也认",
+    )
+    check(
+        pc("字：「在吗」 画面：一只猫 梗：他们刚才说的那个 坑：试探")
+        == "字：「在吗」 画面：一只猫"
+        and pc("画面：一只猫。坑：有人说「字：别信」。画面：后面这句不算") == "画面：一只猫",
+        "没按句号分开写的、后面的项里又出现「字：」「画面：」的：从第一个别的项起全不要",
+    )
+    check(
+        pc("表情包「委屈猫」：字：「在吗」。画面：一只猫探头。梗：看不出出处。意思：有人在等回复。一般用来：找人")
+        == "字：「在吗」。画面：一只猫探头",
+        "词条那种写法：名字、意思、一般用来也不要",
+    )
+    check(
+        pc("一只猫探头，有人说要走了") == ""
+        and pc("梗：某某。画面：一只猫") == ""
+        and pc("") == ""
+        and pc(None) == "",
+        "分不出哪部分是图本身的（没按格式写）：一个字都不留",
+    )
+    one = pc("字：「在吗」。画面：一只猫探头。梗：看不出出处")
+    check(pc(one) == one, "已经只剩「字 / 画面」的再过一遍：不变")
+
+    T = 1_800_000_000.0
+    G, P = "aiocqhttp:GroupMessage:999", "aiocqhttp:FriendMessage:111"
+    sp = seer.StickerDict(after=3, daily=5, keep=50)
+    sp.seen("f:P", G, "u1", before=["群里的话"], said="哈", now=T)
+    try:
+        r = sp.seen("f:P", P, "u2", before=["私聊的话"], said="私聊说的", now=T + 1, private=True)
+        ep = sp.get("f:P")
+        check(
+            not r
+            and ep["n"] == 2
+            and ep["convs"] == [G]
+            and len(ep["ctx"]) == 1
+            and "私聊" not in json.dumps(ep, ensure_ascii=False),
+            "私聊里发的：只记次数；在哪个会话、前后说了什么都不记",
+            ep,
+        )
+        check(P not in sp.pending, "私聊里发的：也不等「之后谁接了什么」", sp.pending)
+        check(
+            sp.seen("f:Q", P, "u2", said="私聊说的", to_bot=True, sticker=True, now=T, private=True)
+            and sp.get("f:Q")["convs"] == []
+            and sp.get("f:Q")["ctx"] == [],
+            "私聊里直接拿表情包找机器人：照样第一次就认（不记会话、不记上下文）",
+            sp.get("f:Q"),
+        )
+        check(sp.seen("f:P", G, "u3", now=T + 3), "私聊里那次也算次数：群里再见到就是第 3 次，该认了")
+    except TypeError as ex:
+        check(False, "StickerDict.seen 认 private（私聊里发的）", ex)
+
+    dp15 = {"name": "猫", "text": "在吗", "scene": "一只猫", "meme": "", "meaning": "找人", "usage": "", "you": "", "trap": "", "conf": 80, "cap": "表情包「猫」：字：「在吗」。画面：一只猫。梗：看不出出处。意思：找人", "t": 1}
+    old = {
+        "items": {
+            "f:mix": {"n": 4, "first": 1, "last": 2, "convs": [P, G], "ctx": [{"before": ["私聊的话"], "said": "", "after": ""}], "deep": dict(dp15, meaning="私聊的话"), "sticker": True},
+            "f:grp": {"n": 3, "first": 1, "last": 2, "convs": [G], "ctx": [{"before": ["群里的话"], "said": "", "after": ""}], "deep": dict(dp15)},
+            "f:many": {"n": 30, "first": 1, "last": 2, "convs": [f"aiocqhttp:GroupMessage:{i}" for i in range(10)], "ctx": [{"before": ["群里的话"], "said": "", "after": ""}], "deep": dict(dp15)},
+            "f:odd": {"n": 2, "first": 1, "last": 2, "convs": ["说不清是哪种会话"], "ctx": [{"before": ["不知道哪来的话"], "said": "", "after": ""}]},
+        },
+        "alias": {"m:x": "f:mix"},
+        "days": {},
+    }
+    sm = seer.StickerDict(after=3, daily=5, keep=50)
+    sm.load(json.loads(json.dumps(old)))
+    mix = sm.get("f:mix") or {}
+    check(
+        "deep" not in mix and mix.get("ctx") == [] and mix.get("convs") == [G] and mix.get("n") == 4 and sm.due("f:mix", T),
+        "老存档里在私聊见过的那条：词条丢掉（下次见到重新认）、前后那几句清掉、私聊的会话标识去掉；次数留着",
+        mix,
+    )
+    check(
+        sm.lookup("f:grp") == dp15["cap"] and len(sm.get("f:grp")["ctx"]) == 1,
+        "老存档里只在群里见过的：原样留着",
+        sm.get("f:grp"),
+    )
+    many = sm.get("f:many") or {}
+    check(
+        "deep" not in many and len(many.get("ctx") or []) == 1 and len(many.get("convs") or []) == 10,
+        "老存档里会话记满 10 个的（更早的已经挤掉了，说不清有没有私聊）：词条也丢掉重新认",
+        many,
+    )
+    odd = sm.get("f:odd") or {}
+    check(odd.get("ctx") == [] and odd.get("convs") == [], "老存档里认不出是不是群聊的会话：按私聊处理", odd)
+    sn = seer.StickerDict(after=3, daily=5, keep=50)
+    for i in range(10):
+        sn.seen("f:N", f"aiocqhttp:GroupMessage:{i}", "u", before=["群里的话"], now=T + i)
+    sn.put_deep("f:N", dict(dp15))
+    sn2 = seer.StickerDict(after=3, daily=5, keep=50)
+    sn2.load(json.loads(json.dumps(sn.dump())))
+    sm2 = seer.StickerDict(after=3, daily=5, keep=50)
+    sm2.load(json.loads(json.dumps(sm.dump())))
+    check(
+        sn2.lookup("f:N") == dp15["cap"] and len(sn2.get("f:N")["convs"]) == 10 and len(sn2.get("f:N")["ctx"]) == 5
+        and sm2.lookup("f:grp") == dp15["cap"],
+        "新版本自己存的再读回来：不再动（清理只做一次）",
+        sn2.get("f:N"),
+    )
+
 ok = sum(1 for c, _ in RES if c)
 bad = [m for c, m in RES if not c]
 print(
